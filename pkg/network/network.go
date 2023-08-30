@@ -38,6 +38,7 @@ const (
 type Resolver interface {
 	ServiceNetwork(service *apiv1.Service) (*NetworkInfo, error)
 	IsMultinetService(service *apiv1.Service) bool
+	NetworkNameFromSelector(service *apiv1.Service) string
 }
 
 // NetworksResolver is responsible for resolving networks that the LB resources should be created in.
@@ -125,6 +126,14 @@ func (nr *NetworksResolver) IsMultinetService(service *apiv1.Service) bool {
 		return false
 	}
 	return true
+}
+
+func (nr *NetworksResolver) NetworkNameFromSelector(service *apiv1.Service) string {
+	if !nr.enableMultinetworking {
+		return ""
+	}
+	networkName := service.Spec.Selector[networkSelector]
+	return networkName
 }
 
 // DefaultNetwork creates network information struct of the default network. Default network is the main cluster network.
@@ -221,6 +230,13 @@ func (fake *FakeNetworkResolver) ServiceNetwork(service *apiv1.Service) (*Networ
 		return nil, fake.err
 	}
 	return fake.networkInfo, nil
+}
+
+func (fake *FakeNetworkResolver) NetworkNameFromSelector(service *apiv1.Service) string {
+	if fake.err != nil {
+		return ""
+	}
+	return fake.networkInfo.K8sNetwork
 }
 
 func (fake *FakeNetworkResolver) IsMultinetService(service *apiv1.Service) bool {
