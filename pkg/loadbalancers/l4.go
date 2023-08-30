@@ -445,7 +445,7 @@ func (l4 *L4) EnsureInternalLoadBalancer(nodeNames []string, svc *corev1.Service
 
 	// if Service network changed, we must delete forwarding rule and the backend service,
 	// otherwise, on updating backend service, google cloud api will return error
-	if existingIPv4FR != nil && existingIPv4FR.Network != l4.network.NetworkURL {
+	if existingIPv4FR != nil && !utils.EqualResourceIDs(existingIPv4FR.Network, l4.network.NetworkURL) {
 		// Delete ipv4 forwarding rule if it exists
 		klog.Infof("Service network changed, deleting existing forwarding rule %s", existingIPv4FR.Name)
 		err = l4.forwardingRules.Delete(existingIPv4FR.Name)
@@ -495,7 +495,7 @@ func (l4 *L4) bsNetworkChanged(existingBS *composite.BackendService) bool {
 	if existingBS.Network == "" && l4.network.IsDefault {
 		return false
 	}
-	return existingBS.Network != l4.network.NetworkURL
+	return !utils.EqualResourceIDs(existingBS.Network, l4.network.NetworkURL)
 }
 
 func (l4 *L4) provideHealthChecks(nodeNames []string, result *L4ILBSyncResult) string {

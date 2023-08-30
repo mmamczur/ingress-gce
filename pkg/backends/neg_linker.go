@@ -70,7 +70,7 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, network strin
 
 		negUrl := ""
 		svcNegKey := fmt.Sprintf("%s/%s", sp.ID.Service.Namespace, negName)
-		negUrl, ok := getNegUrlFromSvcneg(svcNegKey, group.Zone, nl.svcNegLister)
+		negUrl, currentNetwork, ok := getNegUrlAndNetworkFromSvcneg(svcNegKey, group.Zone, nl.svcNegLister)
 		if !ok {
 			klog.V(4).Infof("Falling back to use NEG API to retrieve NEG url for NEG %q", negName)
 			neg, err := nl.negGetter.GetNetworkEndpointGroup(negName, group.Zone, version)
@@ -79,11 +79,10 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, network strin
 			}
 			negUrl = neg.SelfLink
 		}
-		existingNet := getNegNetworkFromSvcneg(svcNegKey, group.Zone, nl.svcNegLister)
-		if network == existingNet || existingNet == "" && network == "default" {
+		if network == currentNetwork || currentNetwork == "" && network == "default" {
 			negSelfLinks = append(negSelfLinks, negUrl)
 		} else {
-			klog.V(2).Infof("Skipping linking NEG %s in zone %s link because networks don't match %s", svcNegKey, group.Zone, network, existingNet)
+			klog.V(2).Infof("Skipping linking NEG %s in zone %s link because networks don't match %s", svcNegKey, group.Zone, network, currentNetwork)
 		}
 	}
 
@@ -247,15 +246,15 @@ func getNegType(sp utils.ServicePort) types.NetworkEndpointType {
 	return types.VmIpPortEndpointType
 }
 
-// getNegUrlFromSvcneg return NEG url from svcneg status if found
-func getNegUrlFromSvcneg(key string, zone string, svcNegLister cache.Indexer) (string, bool) {
+// getNegUrlAndNetworkFromSvcneg return NEG url from svcneg status if found
+func getNegUrlAndNetworkFromSvcneg(key string, zone string, svcNegLister cache.Indexer) (string, string, bool) {
 	obj, exists, err := svcNegLister.GetByKey(key)
 	if err != nil {
 		klog.Errorf("Failed to retrieve svcneg %s from cache: %v", key, err)
-		return "", false
+		return "", "", false
 	}
 	if !exists {
-		return "", false
+		return "", "", false
 	}
 	svcneg := obj.(*negv1beta1.ServiceNetworkEndpointGroup)
 
@@ -266,23 +265,10 @@ func getNegUrlFromSvcneg(key string, zone string, svcNegLister cache.Indexer) (s
 			continue
 		}
 		if key.Key.Zone == zone {
-			return negRef.SelfLink, true
+			return negRef.SelfLink, negRef.Network, true
 		}
 	}
-	return "", false
-}
-
-func getNegNetworkFromSvcneg(key string, zone string, svcNegLister cache.Indexer) string {
-	obj, exists, err := svcNegLister.GetByKey(key)
-	if err != nil {
-		klog.Errorf("Failed to retrieve svcneg %s from cache: %v", key, err)
-		return ""
-	}
-	if !exists {
-		return ""
-	}
-	svcneg := obj.(*negv1beta1.ServiceNetworkEndpointGroup)
-	return svcneg.Status.Network
+	return "", "", false
 }
 
 // relativeResourceNameWithDefault will attempt to return a RelativeResourceName

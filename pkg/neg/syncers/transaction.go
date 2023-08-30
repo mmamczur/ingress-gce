@@ -669,13 +669,22 @@ func (s *transactionSyncer) isZoneChange() bool {
 }
 
 func (s *transactionSyncer) isNetworkChange() bool {
+	s.logger.Info("Checking for network change", "neg", klog.KRef(s.Namespace, s.NegName))
 	negCR, err := getNegFromStore(s.svcNegLister, s.Namespace, s.NegSyncerKey.NegName)
 	if err != nil {
 		s.logger.Error(err, "unable to retrieve neg from the store", "neg", klog.KRef(s.Namespace, s.NegName))
 		metrics.PublishNegControllerErrorCountMetrics(err, true)
 		return false
 	}
-	return negCR.Status.Network != s.networkInfo.K8sNetwork
+	for _, ref := range negCR.Status.NetworkEndpointGroups {
+		if ref.Network != s.networkInfo.K8sNetwork {
+			s.logger.Info("Network changed", "neg", klog.KRef(s.Namespace, s.NegName), "old", ref, "new", s.networkInfo.K8sNetwork)
+			return true
+		}
+	}
+
+	s.logger.Info("Network unchanged", "neg", klog.KRef(s.Namespace, s.NegName))
+	return false
 }
 
 // filterEndpointByTransaction removes the all endpoints from endpoint map if they exists in the transaction table
@@ -752,8 +761,6 @@ func (s *transactionSyncer) updateInitStatus(negObjRefs []negv1beta1.NegObjectRe
 	if len(negObjRefs) != 0 {
 		neg.Status.NetworkEndpointGroups = negObjRefs
 	}
-	neg.Status.Network = s.networkInfo.K8sNetwork
-
 	initializedCondition := getInitializedCondition(utilerrors.NewAggregate(errList))
 	finalCondition := ensureCondition(neg, initializedCondition)
 	metrics.PublishNegInitializationMetrics(finalCondition.LastTransitionTime.Sub(origNeg.GetCreationTimestamp().Time))

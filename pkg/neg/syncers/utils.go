@@ -224,6 +224,7 @@ func ensureNetworkEndpointGroup(svcNamespace, svcName, negName, zone, negService
 		Id:                  fmt.Sprint(neg.Id),
 		SelfLink:            neg.SelfLink,
 		NetworkEndpointType: negv1beta1.NetworkEndpointType(neg.NetworkEndpointType),
+		Network:             networkInfo.K8sNetwork,
 	}
 	return negRef, nil
 }
