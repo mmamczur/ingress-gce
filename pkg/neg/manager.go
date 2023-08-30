@@ -856,6 +856,11 @@ func (manager *syncerManager) getSyncerKey(namespace, name string, servicePortKe
 		calculatorMode = portInfo.EpCalculatorMode
 	}
 
+	network := ""
+	if !portInfo.NetworkInfo.IsDefault {
+		network = portInfo.NetworkInfo.K8sNetwork
+	}
+
 	return negtypes.NegSyncerKey{
 		Namespace:        namespace,
 		Name:             name,
@@ -863,6 +868,7 @@ func (manager *syncerManager) getSyncerKey(namespace, name string, servicePortKe
 		PortTuple:        portInfo.PortTuple,
 		NegType:          networkEndpointType,
 		EpCalculatorMode: calculatorMode,
+		K8sNetwork:       network,
 	}
 }
 

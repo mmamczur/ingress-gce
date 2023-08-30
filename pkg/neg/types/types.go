@@ -279,6 +279,8 @@ type NegSyncerKey struct {
 	//   The endpoints are nodes selected at random in case of Cluster trafficPolicy(L4ClusterMode).
 	//   The endpoints are nodes running backends of this service in case of Local trafficPolicy(L4LocalMode).
 	EpCalculatorMode EndpointsCalculatorMode
+
+	K8sNetwork string
 }
 
 func (key NegSyncerKey) String() string {
