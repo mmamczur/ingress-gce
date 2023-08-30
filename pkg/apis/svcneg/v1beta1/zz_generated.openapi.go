@@ -128,6 +128,13 @@ func schema_pkg_apis_svcneg_v1beta1_NegObjectReference(ref common.ReferenceCallb
 							Format:      "",
 						},
 					},
+					"network": {
+						SchemaProps: spec.SchemaProps{
+							Description: "The network the NEG was created in.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"id"},
 			},
