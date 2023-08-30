@@ -100,7 +100,7 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, network strin
 
 	newBackends := backendsForNEGs(negSelfLinks, &sp)
 	// merge backends
-	mergedBackend, err := mergeBackends(backendService.Backends, newBackends)
+	mergedBackend, err := mergeBackends(removeInstanceGroupBackends(backendService.Backends), newBackends)
 	if err != nil {
 		klog.Errorf("Failed to merge backends from %#v and %#v due to %v", backendService.Backends, newBackends, err)
 		klog.Infof("Fall back to ensure backend service with newBackends.")
@@ -116,6 +116,21 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, network strin
 
 	backendService.Backends = mergedBackend
 	return composite.UpdateBackendService(nl.cloud, key, backendService)
+}
+
+// removeInstanceGroupBackends removes instance group backends in case the service moves from IG backends to NEG backends.
+func removeInstanceGroupBackends(backends []*composite.Backend) []*composite.Backend {
+	var result []*composite.Backend
+	for _, backend := range backends {
+		id, err := cloud.ParseResourceURL(backend.Group)
+		if err != nil {
+			continue
+		}
+		if id.Resource != "instanceGroups" {
+			result = append(result, backend)
+		}
+	}
+	return result
 }
 
 type backendDiff struct {
