@@ -56,7 +56,7 @@ func NewNEGLinker(
 }
 
 // Link implements Link.
-func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, network string) error {
 	version := befeatures.VersionFromServicePort(&sp)
 	var negSelfLinks []string
 	var err error
@@ -79,7 +79,12 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 			}
 			negUrl = neg.SelfLink
 		}
-		negSelfLinks = append(negSelfLinks, negUrl)
+		existingNet := getNegNetworkFromSvcneg(svcNegKey, group.Zone, nl.svcNegLister)
+		if network == existingNet || existingNet == "" && network == "default" {
+			negSelfLinks = append(negSelfLinks, negUrl)
+		} else {
+			klog.V(2).Infof("Skipping linking NEG %s in zone %s link because networks don't match %s", svcNegKey, group.Zone, network, existingNet)
+		}
 	}
 
 	beName := sp.BackendName()
@@ -265,6 +270,19 @@ func getNegUrlFromSvcneg(key string, zone string, svcNegLister cache.Indexer) (s
 		}
 	}
 	return "", false
+}
+
+func getNegNetworkFromSvcneg(key string, zone string, svcNegLister cache.Indexer) string {
+	obj, exists, err := svcNegLister.GetByKey(key)
+	if err != nil {
+		klog.Errorf("Failed to retrieve svcneg %s from cache: %v", key, err)
+		return ""
+	}
+	if !exists {
+		return ""
+	}
+	svcneg := obj.(*negv1beta1.ServiceNetworkEndpointGroup)
+	return svcneg.Status.Network
 }
 
 // relativeResourceNameWithDefault will attempt to return a RelativeResourceName

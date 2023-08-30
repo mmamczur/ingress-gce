@@ -45,6 +45,10 @@ type ServiceNetworkEndpointGroupStatus struct {
 	// +listMapKey=id
 	NetworkEndpointGroups []NegObjectReference `json:"networkEndpointGroups,omitempty"`
 
+	// The network the NEG was created in.
+	// +optional
+	Network string `json:"network,omitempty"`
+
 	// Last time the NEG syncer syncs associated NEGs.
 	// +optional
 	// +listType=map

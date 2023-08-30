@@ -386,7 +386,7 @@ func (l4c *L4Controller) linkNEG(l4 *loadbalancers.L4) error {
 	for _, zone := range zones {
 		groupKeys = append(groupKeys, backends.GroupKey{Zone: zone})
 	}
-	return l4c.NegLinker.Link(l4.ServicePort, groupKeys)
+	return l4c.NegLinker.Link(l4.ServicePort, groupKeys, l4.GetNetwork().K8sNetwork)
 }
 
 func (l4c *L4Controller) sync(key string) error {

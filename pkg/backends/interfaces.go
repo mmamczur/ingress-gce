@@ -69,7 +69,7 @@ type Syncer interface {
 // Linker is an interface to link backends with their associated groups.
 type Linker interface {
 	// Link a BackendService to its groups.
-	Link(sp utils.ServicePort, groups []GroupKey) error
+	Link(sp utils.ServicePort, groups []GroupKey, network string) error
 }
 
 // NEGGetter is an interface to retrieve NEG object

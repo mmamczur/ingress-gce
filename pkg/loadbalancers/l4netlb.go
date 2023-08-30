@@ -596,3 +596,7 @@ func (l4netlb *L4NetLB) hasAnnotation(annotationKey string) bool {
 func (l4netlb *L4NetLB) frName() string {
 	return utils.LegacyForwardingRuleName(l4netlb.Service)
 }
+
+func (l4netlb *L4NetLB) GetNetwork() *network.NetworkInfo {
+	return &l4netlb.networkInfo
+}

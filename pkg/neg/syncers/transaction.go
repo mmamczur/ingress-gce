@@ -241,7 +241,7 @@ func (s *transactionSyncer) syncInternalImpl() error {
 		s.logger.V(3).Info("Skip syncing NEG", "negSyncerKey", s.NegSyncerKey.String())
 		return nil
 	}
-	if s.needInit || s.isZoneChange() {
+	if s.needInit || s.isZoneChange() || s.isNetworkChange() {
 		if err := s.ensureNetworkEndpointGroups(); err != nil {
 			return fmt.Errorf("%w: %v", negtypes.ErrNegNotFound, err)
 		}
@@ -668,6 +668,16 @@ func (s *transactionSyncer) isZoneChange() bool {
 	return !currZones.Equal(existingZones)
 }
 
+func (s *transactionSyncer) isNetworkChange() bool {
+	negCR, err := getNegFromStore(s.svcNegLister, s.Namespace, s.NegSyncerKey.NegName)
+	if err != nil {
+		s.logger.Error(err, "unable to retrieve neg from the store", "neg", klog.KRef(s.Namespace, s.NegName))
+		metrics.PublishNegControllerErrorCountMetrics(err, true)
+		return false
+	}
+	return negCR.Status.Network != s.networkInfo.K8sNetwork
+}
+
 // filterEndpointByTransaction removes the all endpoints from endpoint map if they exists in the transaction table
 func filterEndpointByTransaction(endpointMap map[string]negtypes.NetworkEndpointSet, table networkEndpointTransactionTable, logger klog.Logger) {
 	for _, endpointSet := range endpointMap {
@@ -742,6 +752,7 @@ func (s *transactionSyncer) updateInitStatus(negObjRefs []negv1beta1.NegObjectRe
 	if len(negObjRefs) != 0 {
 		neg.Status.NetworkEndpointGroups = negObjRefs
 	}
+	neg.Status.Network = s.networkInfo.K8sNetwork
 
 	initializedCondition := getInitializedCondition(utilerrors.NewAggregate(errList))
 	finalCondition := ensureCondition(neg, initializedCondition)
