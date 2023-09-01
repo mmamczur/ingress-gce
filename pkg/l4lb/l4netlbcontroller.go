@@ -113,7 +113,7 @@ func NewL4NetLBController(
 		gkeNetworkParamSetLister = ctx.GKENetworkParamsInformer.GetIndexer()
 	}
 	l4netLBc.networkResolver = network.NewNetworksResolver(networkLister, gkeNetworkParamSetLister, ctx.Cloud, ctx.EnableMultinetworking, klog.TODO())
-	l4netLBc.negLinker = backends.NewNEGLinker(l4netLBc.backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer())
+	l4netLBc.negLinker = backends.NewNEGLinker(l4netLBc.backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer(), ctx.EnableMultinetworking)
 	l4netLBc.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("l4netLB", "services", ctx.NumL4NetLBWorkers, l4netLBc.sync)
 
 	ctx.ServiceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -526,7 +526,7 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service) *loadbalancers.L4
 		linkType = negLink
 	}
 
-	if err = lc.ensureBackendLinking(service, linkType); err != nil {
+	if err = lc.ensureBackendLinking(service, linkType, l4netlb.GetNetwork()); err != nil {
 		lc.ctx.Recorder(service.Namespace).Eventf(service, v1.EventTypeWarning, "SyncExternalLoadBalancerFailed",
 			"Error linking instance groups to backend service, err: %v", err)
 		syncResult.Error = err
@@ -573,7 +573,7 @@ func (lc *L4NetLBController) emitEnsuredDualStackEvent(service *v1.Service) {
 		"Successfully ensured %v External LoadBalancer resources", strings.Join(ipFamilies, " "))
 }
 
-func (lc *L4NetLBController) ensureBackendLinking(service *v1.Service, linkType backendLinkType) error {
+func (lc *L4NetLBController) ensureBackendLinking(service *v1.Service, linkType backendLinkType, network *network.NetworkInfo) error {
 	start := time.Now()
 
 	klog.V(2).Infof("Linking backends to backend service for k8s service %s/%s", service.Namespace, service.Name)
@@ -601,7 +601,7 @@ func (lc *L4NetLBController) ensureBackendLinking(service *v1.Service, linkType 
 		for _, zone := range zones {
 			groupKeys = append(groupKeys, backends.GroupKey{Zone: zone})
 		}
-		return lc.negLinker.Link(servicePort, groupKeys)
+		return lc.negLinker.Link(servicePort, groupKeys, network)
 	} else if linkType == instanceGroupLink {
 		klog.V(2).Infof("Linking backend service with Instance Groups for service %s/%s (uses default network)", service.Namespace, service.Name)
 		return lc.igLinker.Link(servicePort, lc.ctx.Cloud.ProjectID(), zones)

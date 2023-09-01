@@ -130,7 +130,7 @@ func NewLoadBalancerController(
 		instancePool:  ctx.InstancePool,
 		l7Pool:        loadbalancers.NewLoadBalancerPool(ctx.Cloud, ctx.ClusterNamer, ctx, namer.NewFrontendNamerFactory(ctx.ClusterNamer, ctx.KubeSystemUID)),
 		backendSyncer: backends.NewBackendSyncer(backendPool, healthChecker, ctx.Cloud),
-		negLinker:     backends.NewNEGLinker(backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer()),
+		negLinker:     backends.NewNEGLinker(backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer(), ctx.EnableMultinetworking),
 		igLinker:      backends.NewInstanceGroupLinker(ctx.InstancePool, backendPool),
 		metrics:       ctx.ControllerMetrics,
 	}
@@ -407,10 +407,10 @@ func (lbc *LoadBalancerController) SyncBackends(state interface{}) error {
 		var linkErr error
 		if sp.NEGEnabled {
 			// Link backend to NEG's if the backend has NEG enabled.
-			linkErr = lbc.negLinker.Link(sp, groupKeys)
+			linkErr = lbc.negLinker.Link(sp, groupKeys, nil)
 		} else {
 			// Otherwise, link backend to IG's.
-			linkErr = lbc.igLinker.Link(sp, groupKeys)
+			linkErr = lbc.igLinker.Link(sp, groupKeys, nil)
 		}
 		if linkErr != nil {
 			return linkErr

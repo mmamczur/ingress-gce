@@ -26,37 +26,35 @@ import (
 	"k8s.io/ingress-gce/pkg/composite"
 	"k8s.io/ingress-gce/pkg/flags"
 	"k8s.io/ingress-gce/pkg/neg/types"
+	"k8s.io/ingress-gce/pkg/network"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/klog/v2"
 )
 
 // negLinker handles linking backends to NEG's.
 type negLinker struct {
-	backendPool  Pool
-	negGetter    NEGGetter
-	cloud        *gce.Cloud
-	svcNegLister cache.Indexer
+	backendPool           Pool
+	negGetter             NEGGetter
+	cloud                 *gce.Cloud
+	svcNegLister          cache.Indexer
+	enableMultinetworking bool
 }
 
 // negLinker is a Linker
 var _ Linker = (*negLinker)(nil)
 
-func NewNEGLinker(
-	backendPool Pool,
-	negGetter NEGGetter,
-	cloud *gce.Cloud,
-	svcNegLister cache.Indexer,
-) Linker {
+func NewNEGLinker(backendPool Pool, negGetter NEGGetter, cloud *gce.Cloud, svcNegLister cache.Indexer, enableMultinetworking bool) Linker {
 	return &negLinker{
-		backendPool:  backendPool,
-		negGetter:    negGetter,
-		cloud:        cloud,
-		svcNegLister: svcNegLister,
+		backendPool:           backendPool,
+		negGetter:             negGetter,
+		cloud:                 cloud,
+		svcNegLister:          svcNegLister,
+		enableMultinetworking: enableMultinetworking,
 	}
 }
 
 // Link implements Link.
-func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, networkInfo *network.NetworkInfo) error {
 	version := befeatures.VersionFromServicePort(&sp)
 	var negSelfLinks []string
 	var err error
@@ -69,15 +67,30 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 		}
 
 		negUrl := ""
+		var neg *composite.NetworkEndpointGroup
 		svcNegKey := fmt.Sprintf("%s/%s", sp.ID.Service.Namespace, negName)
 		negUrl, ok := getNegUrlFromSvcneg(svcNegKey, group.Zone, nl.svcNegLister)
 		if !ok {
 			klog.V(4).Infof("Falling back to use NEG API to retrieve NEG url for NEG %q", negName)
-			neg, err := nl.negGetter.GetNetworkEndpointGroup(negName, group.Zone, version)
+			neg, err = nl.negGetter.GetNetworkEndpointGroup(negName, group.Zone, version)
 			if err != nil {
 				return err
 			}
 			negUrl = neg.SelfLink
+		}
+		// When service network is changed it is possible that the NEG network will not match.
+		// Check if the networks match, do not link with NEGs that are not in the service network.
+		if nl.enableMultinetworking && networkInfo != nil {
+			if neg == nil {
+				neg, err = nl.negGetter.GetNetworkEndpointGroup(negName, group.Zone, version)
+				if err != nil {
+					return err
+				}
+			}
+			if !nl.negNetworkMatchesServiceNetwork(neg, networkInfo) {
+				klog.V(4).Infof("NEG network (%s) does not match the service network (%s), skipping NEG link", neg.Network, networkInfo.NetworkURL)
+				continue
+			}
 		}
 		negSelfLinks = append(negSelfLinks, negUrl)
 	}
@@ -103,7 +116,14 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 		mergedBackend = newBackends
 	}
 
-	diff := diffBackends(backendService.Backends, mergedBackend)
+	currentBackends := backendService.Backends
+	// for multinet it is possible to go from IG backend to NEG backend.
+	// In case like that remove any IG backend before attaching NEGs.
+	if nl.enableMultinetworking {
+		currentBackends = removeInstanceGroupBackends(currentBackends)
+	}
+
+	diff := diffBackends(currentBackends, mergedBackend)
 	if diff.isEqual() {
 		klog.V(2).Infof("No changes in backends for service port %s", sp.ID)
 		return nil
@@ -112,6 +132,27 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 
 	backendService.Backends = mergedBackend
 	return composite.UpdateBackendService(nl.cloud, key, backendService)
+}
+
+// removeInstanceGroupBackends removes instance group backends in case the service moves from IG backends to NEG backends.
+func removeInstanceGroupBackends(backends []*composite.Backend) []*composite.Backend {
+	var result []*composite.Backend
+	for _, backend := range backends {
+		id, err := cloud.ParseResourceURL(backend.Group)
+		if err != nil {
+			continue
+		}
+		if id.Resource != "instanceGroups" {
+			result = append(result, backend)
+		}
+	}
+	return result
+}
+
+func (nl *negLinker) negNetworkMatchesServiceNetwork(neg *composite.NetworkEndpointGroup, networkInfo *network.NetworkInfo) bool {
+	networkMatches := neg.Network == "" && networkInfo.IsDefault || neg.Network == networkInfo.NetworkURL || utils.EqualResourceIDs(neg.Network, networkInfo.NetworkURL)
+	subnetworkMatches := neg.Subnetwork == "" && networkInfo.IsDefault || neg.Subnetwork == networkInfo.SubnetworkURL || utils.EqualResourceIDs(neg.Subnetwork, networkInfo.SubnetworkURL)
+	return networkMatches && subnetworkMatches
 }
 
 type backendDiff struct {

@@ -20,6 +20,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/ingress-gce/pkg/apis/svcneg/v1beta1"
+	"k8s.io/ingress-gce/pkg/network"
+	"k8s.io/ingress-gce/pkg/utils/namer"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/mock"
@@ -36,7 +38,7 @@ import (
 	"k8s.io/ingress-gce/pkg/utils"
 )
 
-func newTestNEGLinker(fakeNEG negtypes.NetworkEndpointGroupCloud, fakeGCE *gce.Cloud) *negLinker {
+func newTestNEGLinker(fakeNEG negtypes.NetworkEndpointGroupCloud, fakeGCE *gce.Cloud, enableMultinet bool) *negLinker {
 	fakeBackendPool := NewPool(fakeGCE, defaultNamer)
 	ctx := negtypes.NewTestContext()
 
@@ -47,7 +49,7 @@ func newTestNEGLinker(fakeNEG negtypes.NetworkEndpointGroupCloud, fakeGCE *gce.C
 	(fakeGCE.Compute().(*cloud.MockGCE)).MockAlphaRegionBackendServices.UpdateHook = mock.UpdateAlphaRegionBackendServiceHook
 	(fakeGCE.Compute().(*cloud.MockGCE)).MockBetaRegionBackendServices.UpdateHook = mock.UpdateBetaRegionBackendServiceHook
 	(fakeGCE.Compute().(*cloud.MockGCE)).MockRegionBackendServices.UpdateHook = mock.UpdateRegionBackendServiceHook
-	return &negLinker{fakeBackendPool, fakeNEG, fakeGCE, ctx.SvcNegInformer.GetIndexer()}
+	return &negLinker{fakeBackendPool, fakeNEG, fakeGCE, ctx.SvcNegInformer.GetIndexer(), enableMultinet}
 }
 
 func TestLinkBackendServiceToNEG(t *testing.T) {
@@ -67,7 +69,7 @@ func TestLinkBackendServiceToNEG(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
 			fakeNEG := negtypes.NewFakeNetworkEndpointGroupCloud("test-subnetwork", "test-network")
-			linker := newTestNEGLinker(fakeNEG, fakeGCE)
+			linker := newTestNEGLinker(fakeNEG, fakeGCE, false)
 
 			zones := []GroupKey{{Zone: "zone1"}, {Zone: "zone2"}}
 			namespace, name, port := "ns", "name", "port"
@@ -117,7 +119,7 @@ func TestLinkBackendServiceToNEG(t *testing.T) {
 					}
 				}
 
-				if err := linker.Link(svcPort, zones); err != nil {
+				if err := linker.Link(svcPort, zones, nil); err != nil {
 					t.Fatalf("Failed to link backend service to NEG for svcPort %v: %v", svcPort, err)
 				}
 
@@ -155,7 +157,7 @@ func TestLinkBackendServiceToNEG(t *testing.T) {
 
 				// mimic cluster node shrinks to one of the zone
 				shrinkZone := []GroupKey{zones[0]}
-				if err := linker.Link(svcPort, shrinkZone); err != nil {
+				if err := linker.Link(svcPort, shrinkZone, nil); err != nil {
 					t.Fatalf("Failed to link backend service to NEG for svcPort %v: %v", svcPort, err)
 				}
 
@@ -539,4 +541,145 @@ func TestBackendsForNEG(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMultinetLinkBackendServiceToNEG(t *testing.T) {
+	defaultNetwork := &network.NetworkInfo{
+		IsDefault:     true,
+		K8sNetwork:    "default",
+		NetworkURL:    "https://www.googleapis.com/compute/v1/projects/test-project/global/networks/default",
+		SubnetworkURL: "https://www.googleapis.com/compute/v1/projects/test-project/regions/test-region/subnetworks/default",
+	}
+	for _, tc := range []struct {
+		name             string
+		enableMultinet   bool
+		negNetworkURL    string
+		negSubnetworkURL string
+		serviceNetwork   *network.NetworkInfo
+		wantLink         bool
+	}{
+		{
+			name:             "multinet disabled",
+			enableMultinet:   false,
+			negNetworkURL:    "something",
+			negSubnetworkURL: "another something",
+			serviceNetwork:   defaultNetwork,
+			wantLink:         true,
+		},
+		{
+			name:             "multinet enabled with matching network",
+			enableMultinet:   true,
+			negNetworkURL:    "projects/test-project/global/networks/default",
+			negSubnetworkURL: "projects/test-project/regions/test-region/subnetworks/default",
+			serviceNetwork:   defaultNetwork,
+			wantLink:         true,
+		},
+		{
+			name:             "multinet enabled with empty neg network in default network",
+			enableMultinet:   true,
+			negNetworkURL:    "",
+			negSubnetworkURL: "",
+			serviceNetwork:   defaultNetwork,
+			wantLink:         true,
+		},
+		{
+			name:             "multinet enabled with not matching network",
+			enableMultinet:   true,
+			negNetworkURL:    "projects/test-project/global/networks/other",
+			negSubnetworkURL: "projects/test-project/regions/test-region/subnetworks/default",
+			serviceNetwork:   defaultNetwork,
+			wantLink:         false,
+		},
+		{
+			name:             "multinet enabled with not matching subnetwork",
+			enableMultinet:   true,
+			negNetworkURL:    "projects/test-project/global/networks/default",
+			negSubnetworkURL: "projects/test-project/regions/test-region/subnetworks/other",
+			serviceNetwork:   defaultNetwork,
+			wantLink:         false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeGCE := gce.NewFakeGCECloud(gce.DefaultTestClusterValues())
+			fakeNEG := negtypes.NewFakeNetworkEndpointGroupCloud("test-subnetwork", "test-network")
+			linker := newTestNEGLinker(fakeNEG, fakeGCE, tc.enableMultinet)
+
+			zones := []GroupKey{{Zone: "zone1"}, {Zone: "zone2"}}
+			namespace, name := "ns", "name"
+			svc := types.NamespacedName{Namespace: namespace, Name: name}
+
+			l4namer := namer.NewL4Namer("test", namer.NewNamer("testCluster", "testFirewall"))
+			svcPort := utils.ServicePort{
+				ID:             utils.ServicePortID{Service: svc},
+				BackendNamer:   l4namer,
+				VMIPNEGEnabled: true,
+			}
+
+			beName := svcPort.BackendName()
+			scope := befeatures.ScopeFromServicePort(&svcPort)
+
+			key, err := composite.CreateKey(fakeGCE, beName, scope)
+			if err != nil {
+				t.Fatalf("failed to create key %v", err)
+			}
+
+			expectedBS := &composite.BackendService{
+				Name:                beName,
+				Protocol:            "TCP",
+				HealthChecks:        []string{"testLink"},
+				LoadBalancingScheme: string(cloud.SchemeInternal),
+				Network:             tc.serviceNetwork.NetworkURL,
+			}
+
+			err = composite.CreateBackendService(fakeGCE, key, expectedBS)
+			if err != nil {
+				t.Fatalf("composite.CreateBackendService() failed, err=%v", err)
+			}
+
+			version := befeatures.VersionFromServicePort(&svcPort)
+
+			for _, key := range zones {
+				neg := &composite.NetworkEndpointGroup{
+					Name:                beName,
+					Version:             version,
+					NetworkEndpointType: string(negtypes.VmIpEndpointType),
+					Network:             tc.negNetworkURL,
+					Subnetwork:          tc.negSubnetworkURL,
+				}
+				err := fakeNEG.CreateNetworkEndpointGroup(neg, key.Zone)
+				if err != nil {
+					t.Fatalf("unexpected error creating NEG for svcPort %v: %v", svcPort, err)
+				}
+			}
+			err = linker.Link(svcPort, zones, tc.serviceNetwork)
+			if err != nil {
+				t.Fatalf("Failed to link backend service to NEG for svcPort %v: %v", svcPort, err)
+			}
+
+			bs, err := composite.GetBackendService(fakeGCE, key, version)
+			if err != nil {
+				t.Fatalf("Failed to retrieve backend service using key %+v for svcPort %v: %v", key, svcPort, err)
+			}
+			if tc.wantLink && len(bs.Backends) != len(zones) {
+				t.Errorf("Expect %v backends in backend service %s, but got %v.key %+v %+v", len(zones), beName, len(bs.Backends), key, bs)
+			}
+
+			if !tc.wantLink && len(bs.Backends) != 0 {
+				t.Errorf("Expect no backends in backend service %s, but got %v.key %+v %+v", beName, len(bs.Backends), key, bs)
+			}
+
+			for _, be := range bs.Backends {
+				neg := "networkEndpointGroups"
+				if !strings.Contains(be.Group, neg) {
+					t.Errorf("Got backend link %q, want containing %q", be.Group, neg)
+				}
+				// Balancing mode should be connection, rate should be unset
+				if be.BalancingMode != string(Connections) || be.MaxRatePerEndpoint != 0 {
+					t.Errorf("Only 'Connection' balancing mode is supported with VM_IP NEGs, Got %q with max rate %v", be.BalancingMode, be.MaxRatePerEndpoint)
+				}
+			}
+		})
+
+	}
+
 }

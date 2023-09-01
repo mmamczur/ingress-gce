@@ -89,7 +89,7 @@ func TestBackendInstanceGroupClobbering(t *testing.T) {
 	if err := jig.syncer.Sync([]utils.ServicePort{sp}); err != nil {
 		t.Fatalf("Did not expect error when syncing backend with port %v", sp.NodePort)
 	}
-	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}); err != nil {
+	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}, nil); err != nil {
 		t.Fatalf("Did not expect error when linking backend with port %v to groups", sp.NodePort)
 	}
 
@@ -117,7 +117,7 @@ func TestBackendInstanceGroupClobbering(t *testing.T) {
 	if err := jig.syncer.Sync([]utils.ServicePort{sp}); err != nil {
 		t.Fatalf("Did not expect error when syncing backend with port %v", sp.NodePort)
 	}
-	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}); err != nil {
+	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}, nil); err != nil {
 		t.Fatalf("Did not expect error when linking backend with port %v to groups", sp.NodePort)
 	}
 
@@ -162,7 +162,7 @@ func TestSyncChaosMonkey(t *testing.T) {
 	if err := jig.syncer.Sync([]utils.ServicePort{sp}); err != nil {
 		t.Fatalf("Did not expect error when syncing backend with port %v, err: %v", sp.NodePort, err)
 	}
-	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}); err != nil {
+	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}, nil); err != nil {
 		t.Fatalf("Did not expect error when linking backend with port %v to groups, err: %v", sp.NodePort, err)
 	}
 
@@ -195,7 +195,7 @@ func TestSyncChaosMonkey(t *testing.T) {
 	if err := jig.syncer.Sync([]utils.ServicePort{sp}); err != nil {
 		t.Fatalf("Did not expect error when syncing backend with port %v", sp.NodePort)
 	}
-	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}); err != nil {
+	if err := jig.linker.Link(sp, []GroupKey{{Zone: defaultZone}}, nil); err != nil {
 		t.Fatalf("Did not expect error when linking backend with port %v to groups", sp.NodePort)
 	}
 	if createCalls > 0 {

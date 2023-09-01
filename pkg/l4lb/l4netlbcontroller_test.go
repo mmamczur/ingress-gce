@@ -1726,7 +1726,7 @@ type fakeNEGLinker struct {
 	groups []backends.GroupKey
 }
 
-func (l *fakeNEGLinker) Link(sp utils.ServicePort, groups []backends.GroupKey) error {
+func (l *fakeNEGLinker) Link(sp utils.ServicePort, groups []backends.GroupKey, networkInfo *network.NetworkInfo) error {
 	l.called = true
 	l.sp = sp
 	l.groups = groups
@@ -1739,7 +1739,7 @@ func TestEnsureBackendLinkingWithNEGs(t *testing.T) {
 	controller.negLinker = linker
 	svc := test.NewL4NetLBRBSService(8080)
 
-	err := controller.ensureBackendLinking(svc, negLink)
+	err := controller.ensureBackendLinking(svc, negLink, nil)
 	if err != nil {
 		t.Fatalf("ensureBackendLinking() failed, err=%v", err)
 	}
@@ -1772,7 +1772,7 @@ func TestEnsureBackendLinkingWithInstanceGroups(t *testing.T) {
 		t.Fatalf("CreateRegionBackendService() failed, err=%v", err)
 	}
 
-	err = controller.ensureBackendLinking(svc, instanceGroupLink)
+	err = controller.ensureBackendLinking(svc, instanceGroupLink, nil)
 	if err != nil {
 		t.Fatalf("ensureBackendLinking() failed, err=%v", err)
 	}

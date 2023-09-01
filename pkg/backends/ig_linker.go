@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/ingress-gce/pkg/composite"
 	"k8s.io/ingress-gce/pkg/instancegroups"
+	"k8s.io/ingress-gce/pkg/network"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/klog/v2"
 )
@@ -78,7 +79,7 @@ func NewInstanceGroupLinker(instancePool instancegroups.Manager, backendPool Poo
 }
 
 // Link implements Link.
-func (igl *instanceGroupLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+func (igl *instanceGroupLinker) Link(sp utils.ServicePort, groups []GroupKey, networkInfo *network.NetworkInfo) error {
 	var igLinks []string
 	for _, group := range groups {
 		ig, err := igl.instancePool.Get(sp.IGName(), group.Zone)

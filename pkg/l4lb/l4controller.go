@@ -100,7 +100,7 @@ func NewILBController(ctx *context.ControllerContext, stopCh chan struct{}) *L4C
 		enableDualStack: ctx.EnableL4ILBDualStack,
 	}
 	l4c.backendPool = backends.NewPool(ctx.Cloud, l4c.namer)
-	l4c.NegLinker = backends.NewNEGLinker(l4c.backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer())
+	l4c.NegLinker = backends.NewNEGLinker(l4c.backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer(), false)
 
 	l4c.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("l4", "services", l4c.numWorkers, l4c.sync)
 
@@ -386,7 +386,7 @@ func (l4c *L4Controller) linkNEG(l4 *loadbalancers.L4) error {
 	for _, zone := range zones {
 		groupKeys = append(groupKeys, backends.GroupKey{Zone: zone})
 	}
-	return l4c.NegLinker.Link(l4.ServicePort, groupKeys)
+	return l4c.NegLinker.Link(l4.ServicePort, groupKeys, l4.GetNetwork())
 }
 
 func (l4c *L4Controller) sync(key string) error {

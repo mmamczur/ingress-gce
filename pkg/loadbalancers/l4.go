@@ -685,3 +685,7 @@ func (l4 *L4) getOldIPv4ForwardingRule(existingBS *composite.BackendService) (*c
 
 	return l4.forwardingRules.Get(oldFRName)
 }
+
+func (l4 *L4) GetNetwork() *network.NetworkInfo {
+	return &l4.network
+}

@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	api_v1 "k8s.io/api/core/v1"
 	"k8s.io/ingress-gce/pkg/composite"
+	"k8s.io/ingress-gce/pkg/network"
 	"k8s.io/ingress-gce/pkg/utils"
 )
 
@@ -69,7 +70,7 @@ type Syncer interface {
 // Linker is an interface to link backends with their associated groups.
 type Linker interface {
 	// Link a BackendService to its groups.
-	Link(sp utils.ServicePort, groups []GroupKey) error
+	Link(sp utils.ServicePort, groups []GroupKey, networkInfo *network.NetworkInfo) error
 }
 
 // NEGGetter is an interface to retrieve NEG object
