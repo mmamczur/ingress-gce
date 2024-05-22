@@ -307,7 +307,7 @@ func (b *Backends) DeleteSignedUrlKey(be *composite.BackendService, keyName stri
 
 // EnsureL4BackendService creates or updates the backend service with the given name.
 // TODO(code-elinka): refactor the list of arguments (there are too many now)
-func (b *Backends) EnsureL4BackendService(name, hcLink, protocol, sessionAffinity, scheme string, namespacedName types.NamespacedName, network network.NetworkInfo, connectionTrackingPolicy *composite.BackendServiceConnectionTrackingPolicy, beLogger klog.Logger) (*composite.BackendService, error) {
+func (b *Backends) EnsureL4BackendService(name, hcLink, protocol, sessionAffinity, scheme string, namespacedName types.NamespacedName, network network.NetworkInfo, connectionTrackingPolicy *composite.BackendServiceConnectionTrackingPolicy, beLogger klog.Logger) (*composite.BackendService, bool, error) {
 	start := time.Now()
 	beLogger.V(2).Info("EnsureL4BackendService started", "serviceKey", namespacedName, "scheme", scheme, "protocol", protocol, "sessionAffinity", sessionAffinity, "network", network.NetworkURL, "subnetwork", network.SubnetworkURL)
 	defer func() {
@@ -317,11 +317,11 @@ func (b *Backends) EnsureL4BackendService(name, hcLink, protocol, sessionAffinit
 	beLogger.V(2).Info("EnsureL4BackendService: checking existing backend service", "protocol", protocol, "scheme", scheme, "serviceKey", namespacedName)
 	key, err := composite.CreateKey(b.cloud, name, meta.Regional)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	bs, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
 	if err != nil && !utils.IsNotFoundError(err) {
-		return nil, err
+		return nil, false, err
 	}
 	desc, err := utils.MakeL4LBServiceDescription(namespacedName.String(), "", meta.VersionGA, false, utils.ILB)
 	if err != nil {
@@ -356,18 +356,19 @@ func (b *Backends) EnsureL4BackendService(name, hcLink, protocol, sessionAffinit
 		beLogger.V(2).Info("EnsureL4BackendService: creating backend service", "protocol", protocol, "scheme", scheme, "serviceKey", namespacedName)
 		err := composite.CreateBackendService(b.cloud, key, expectedBS, beLogger)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		beLogger.V(2).Info("EnsureL4BackendService: created backend service successfully", "protocol", protocol, "scheme", scheme, "serviceKey", namespacedName)
 		// We need to perform a GCE call to re-fetch the object we just created
 		// so that the "Fingerprint" field is filled in. This is needed to update the
 		// object without error. The lookup is also needed to populate the selfLink.
-		return composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+		createdBS, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+		return createdBS, true, err
 	}
 
 	if backendSvcEqual(expectedBS, bs, b.useConnectionTrackingPolicy) {
 		beLogger.V(2).Info("EnsureL4BackendService: backend service did not change, skipping update", "protocol", protocol, "scheme", scheme, "serviceKey", namespacedName)
-		return bs, nil
+		return bs, false, nil
 	}
 	if bs.ConnectionDraining != nil && bs.ConnectionDraining.DrainingTimeoutSec > 0 && protocol == string(api_v1.ProtocolTCP) {
 		// only preserves user overridden timeout value when the protocol is TCP
@@ -379,11 +380,12 @@ func (b *Backends) EnsureL4BackendService(name, hcLink, protocol, sessionAffinit
 	// Copy backends to avoid detaching them during update. This could be replaced with a patch call in the future.
 	expectedBS.Backends = bs.Backends
 	if err := composite.UpdateBackendService(b.cloud, key, expectedBS, beLogger); err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	beLogger.V(2).Info("EnsureL4BackendService: updated backend service successfully", "protocol", protocol, "scheme", scheme, "serviceKey", namespacedName)
 
-	return composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+	updatedBS, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+	return updatedBS, true, err
 }
 
 // backendSvcEqual returns true if the 2 BackendService objects are equal.

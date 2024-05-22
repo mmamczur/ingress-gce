@@ -134,7 +134,7 @@ func (l4 *L4) deleteChangedIPv6ForwardingRule(existingFwdRule *composite.Forward
 	return nil
 }
 
-func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.ForwardingRule, error) {
+func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.ForwardingRule, bool, error) {
 	start := time.Now()
 	expectedIPv6FrName := l4netlb.ipv6FRName()
 
@@ -147,12 +147,12 @@ func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.Forw
 	existingIPv6FwdRule, err := l4netlb.forwardingRules.Get(expectedIPv6FrName)
 	if err != nil {
 		frLogger.Error(err, "l4netlb.forwardingRules.Get returned error")
-		return nil, err
+		return nil, false, err
 	}
 
 	subnetworkURL, err := l4netlb.ipv6SubnetURL()
 	if err != nil {
-		return nil, fmt.Errorf("error getting ipv6 forwarding rule subnet: %w", err)
+		return nil, false, fmt.Errorf("error getting ipv6 forwarding rule subnet: %w", err)
 	}
 	frLogger.V(2).Info("subnetworkURL for service", "subnetworkURL", subnetworkURL)
 
@@ -161,7 +161,7 @@ func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.Forw
 	ipv6AddrToUse, err := ipv6AddressToUse(l4netlb.cloud, l4netlb.Service, existingIPv6FwdRule, subnetworkURL, frLogger)
 	if err != nil {
 		frLogger.Error(err, "ipv6AddressToUse for service returned error")
-		return nil, err
+		return nil, false, err
 	}
 	frLogger.V(2).Info("ipv6AddressToUse for service", "ipv6AddressToUse", ipv6AddrToUse)
 
@@ -178,13 +178,13 @@ func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.Forw
 		// If they do not match, tear down the existing resources with the wrong tier.
 		if isFromAnnotation {
 			if err := l4netlb.tearDownResourcesWithWrongNetworkTier(existingIPv6FwdRule, netTier, addrMgr, frLogger); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
 		ipv6AddrToUse, _, err = addrMgr.HoldAddress()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		frLogger.V(2).Info("ensureIPv6ForwardingRule: reserved IP for the forwarding rule", "ip", ipv6AddrToUse)
 		defer func() {
@@ -204,7 +204,7 @@ func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.Forw
 
 	expectedIPv6FwdRule, err := l4netlb.buildExpectedIPv6ForwardingRule(bsLink, ipv6AddrToUse, subnetworkURL, netTier)
 	if err != nil {
-		return nil, fmt.Errorf("l4netlb.buildExpectedIPv6ForwardingRule(%s, %s, %s, %v) returned error %w, want nil", bsLink, ipv6AddrToUse, subnetworkURL, netTier, err)
+		return nil, false, fmt.Errorf("l4netlb.buildExpectedIPv6ForwardingRule(%s, %s, %s, %v) returned error %w, want nil", bsLink, ipv6AddrToUse, subnetworkURL, netTier, err)
 	}
 	frLogger.V(2).Info("l4netlb.buildExpectedIPv6ForwardingRule(_,_,_,_) for service", "expectedIPv6FwdRule", expectedIPv6FwdRule)
 
@@ -212,30 +212,30 @@ func (l4netlb *L4NetLB) ensureIPv6ForwardingRule(bsLink string) (*composite.Forw
 		if existingIPv6FwdRule.NetworkTier != expectedIPv6FwdRule.NetworkTier {
 			resource := fmt.Sprintf("Forwarding rule (%v)", existingIPv6FwdRule.Name)
 			networkTierMismatchError := utils.NewNetworkTierErr(resource, existingIPv6FwdRule.NetworkTier, expectedIPv6FwdRule.NetworkTier)
-			return nil, networkTierMismatchError
+			return nil, false, networkTierMismatchError
 		}
 
 		equal, err := EqualIPv6ForwardingRules(existingIPv6FwdRule, expectedIPv6FwdRule)
 		if err != nil {
-			return existingIPv6FwdRule, err
+			return existingIPv6FwdRule, false, err
 		}
 		if equal {
 			frLogger.V(2).Info("ensureIPv6ForwardingRule: Skipping update of unchanged ipv6 forwarding rule")
-			return existingIPv6FwdRule, nil
+			return existingIPv6FwdRule, false, nil
 		}
 		err = l4netlb.deleteChangedIPv6ForwardingRule(existingIPv6FwdRule, expectedIPv6FwdRule)
 		if err != nil {
-			return nil, err
+			return nil, true, err
 		}
 	}
 	frLogger.V(2).Info("ensureIPv6ForwardingRule: Creating/Recreating forwarding rule")
 	err = l4netlb.forwardingRules.Create(expectedIPv6FwdRule)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 
 	createdFr, err := l4netlb.forwardingRules.Get(expectedIPv6FwdRule.Name)
-	return createdFr, err
+	return createdFr, true, err
 }
 
 func (l4netlb *L4NetLB) buildExpectedIPv6ForwardingRule(bsLink, ipv6AddressToUse, subnetworkURL string, netTier cloud.NetworkTier) (*composite.ForwardingRule, error) {

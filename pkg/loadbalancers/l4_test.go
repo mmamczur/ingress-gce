@@ -86,15 +86,21 @@ func TestEnsureInternalBackendServiceUpdates(t *testing.T) {
 	l4.healthChecks = healthchecksl4.Fake(fakeGCE, l4ilbParams.Recorder)
 
 	bsName := l4.namer.L4Backend(l4.Service.Namespace, l4.Service.Name)
-	_, err := l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(svc.Spec.SessionAffinity), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
+	_, wasUpdate, err := l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(svc.Spec.SessionAffinity), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
 	if err != nil {
 		t.Errorf("Failed to ensure backend service  %s - err %v", bsName, err)
 	}
+	if !wasUpdate {
+		t.Errorf("First ensure of a Backend Service %s should be an update/create", bsName)
+	}
 
 	// Update the Internal Backend Service with a new ServiceAffinity
-	_, err = l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(v1.ServiceAffinityNone), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
+	_, wasUpdate, err = l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(v1.ServiceAffinityNone), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
 	if err != nil {
 		t.Errorf("Failed to ensure backend service  %s - err %v", bsName, err)
+	}
+	if !wasUpdate {
+		t.Errorf("A change in Backend Service %s should be reported as update but it was not ", bsName)
 	}
 	key := meta.RegionalKey(bsName, l4.cloud.Region())
 	bs, err := composite.GetBackendService(l4.cloud, key, meta.VersionGA, klog.TODO())
@@ -113,7 +119,7 @@ func TestEnsureInternalBackendServiceUpdates(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to update backend service with new connection draining timeout - err %v", err)
 	}
-	bs, err = l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(v1.ServiceAffinityNone), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
+	bs, _, err = l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(v1.ServiceAffinityNone), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
 	if err != nil {
 		t.Errorf("Failed to ensure backend service  %s - err %v", bsName, err)
 	}
@@ -122,6 +128,15 @@ func TestEnsureInternalBackendServiceUpdates(t *testing.T) {
 	}
 	if bs.ConnectionDraining.DrainingTimeoutSec != newTimeout {
 		t.Errorf("Connection Draining timeout got reconciled to %d, expected %d", bs.ConnectionDraining.DrainingTimeoutSec, newTimeout)
+	}
+
+	// check if triggering ensure with the same params does not cause an update
+	bs, wasUpdate, err = l4.backendPool.EnsureL4BackendService(bsName, "", "TCP", string(v1.ServiceAffinityNone), string(cloud.SchemeInternal), l4.NamespacedName, *network.DefaultNetwork(fakeGCE), noConnectionTrackingPolicy, klog.TODO())
+	if err != nil {
+		t.Errorf("Failed to ensure backend service  %s - err %v", bsName, err)
+	}
+	if wasUpdate {
+		t.Errorf("Ensure with the same parameters should result in no update reported")
 	}
 }
 
@@ -292,7 +307,7 @@ func TestEnsureInternalLoadBalancerWithExistingResources(t *testing.T) {
 	if hcResult.Err != nil {
 		t.Errorf("Failed to create healthcheck, err %v", hcResult.Err)
 	}
-	_, err := l4.backendPool.EnsureL4BackendService(lbName, hcResult.HCLink, "TCP", string(l4.Service.Spec.SessionAffinity), string(cloud.SchemeInternal), l4.NamespacedName, *defaultNetwork, noConnectionTrackingPolicy, klog.TODO())
+	_, _, err := l4.backendPool.EnsureL4BackendService(lbName, hcResult.HCLink, "TCP", string(l4.Service.Spec.SessionAffinity), string(cloud.SchemeInternal), l4.NamespacedName, *defaultNetwork, noConnectionTrackingPolicy, klog.TODO())
 	if err != nil {
 		t.Errorf("Failed to create backendservice, err %v", err)
 	}

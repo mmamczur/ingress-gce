@@ -361,7 +361,7 @@ func TestL4CreateExternalForwardingRuleAddressAlreadyInUse(t *testing.T) {
 	fakeGCE.ReserveRegionAddress(addr, fakeGCE.Region())
 	insertError := &googleapi.Error{Code: http.StatusBadRequest, Message: "Invalid value for field 'resource.IPAddress': '1.1.1.1'. Specified IP address is in-use and would result in a conflict., invalid"}
 	fakeGCE.Compute().(*cloud.MockGCE).MockForwardingRules.InsertHook = test.InsertForwardingRuleErrorHook(insertError)
-	_, _, err := l4.ensureIPv4ForwardingRule("link")
+	_, _, _, err := l4.ensureIPv4ForwardingRule("link")
 
 	require.Error(t, err)
 	assert.True(t, utils.IsIPConfigurationError(err))
