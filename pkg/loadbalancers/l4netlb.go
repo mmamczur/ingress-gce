@@ -85,6 +85,23 @@ type L4NetLBSyncResult struct {
 	MetricsState       metrics.L4ServiceState
 	SyncType           string
 	StartTime          time.Time
+	GCEResourceUpdate  ResourceUpdates
+}
+
+type ResourceUpdates struct {
+	backendServiceUpdate   bool
+	forwardingRuleUpdate   bool
+	healthCheckUpdate      bool
+	firewallForNodesUpdate bool
+	firewallForHCUpdate    bool
+}
+
+func (ru *ResourceUpdates) WereAnyResourcesModified() bool {
+	return ru.forwardingRuleUpdate ||
+		ru.backendServiceUpdate ||
+		ru.healthCheckUpdate ||
+		ru.firewallForNodesUpdate ||
+		ru.firewallForHCUpdate
 }
 
 func NewL4SyncResult(syncType string, svc *corev1.Service, isMultinet bool, enabledStrongSessionAffinity bool) *L4NetLBSyncResult {
@@ -265,6 +282,8 @@ func (l4netlb *L4NetLB) provideHealthChecks(nodeNames []string, result *L4NetLBS
 func (l4netlb *L4NetLB) provideDualStackHealthChecks(nodeNames []string, result *L4NetLBSyncResult) string {
 	sharedHC := !helpers.RequestsOnlyLocalTraffic(l4netlb.Service)
 	hcResult := l4netlb.healthChecks.EnsureHealthCheckWithDualStackFirewalls(l4netlb.Service, l4netlb.namer, sharedHC, l4netlb.scope, utils.XLB, nodeNames, utils.NeedsIPv4(l4netlb.Service), utils.NeedsIPv6(l4netlb.Service), l4netlb.networkInfo, l4netlb.svcLogger)
+	result.GCEResourceUpdate.healthCheckUpdate = hcResult.WasUpdated
+	result.GCEResourceUpdate.firewallForHCUpdate = hcResult.WasFirewallUpdated
 	if hcResult.Err != nil {
 		result.GCEResourceInError = hcResult.GceResourceInError
 		result.Error = hcResult.Err
@@ -284,6 +303,8 @@ func (l4netlb *L4NetLB) provideDualStackHealthChecks(nodeNames []string, result 
 func (l4netlb *L4NetLB) provideIPv4HealthChecks(nodeNames []string, result *L4NetLBSyncResult) string {
 	sharedHC := !helpers.RequestsOnlyLocalTraffic(l4netlb.Service)
 	hcResult := l4netlb.healthChecks.EnsureHealthCheckWithFirewall(l4netlb.Service, l4netlb.namer, sharedHC, l4netlb.scope, utils.XLB, nodeNames, l4netlb.networkInfo, l4netlb.svcLogger)
+	result.GCEResourceUpdate.healthCheckUpdate = hcResult.WasUpdated
+	result.GCEResourceUpdate.firewallForHCUpdate = hcResult.WasFirewallUpdated
 	if hcResult.Err != nil {
 		result.GCEResourceInError = hcResult.GceResourceInError
 		result.Error = hcResult.Err
@@ -326,7 +347,8 @@ func (l4netlb *L4NetLB) provideBackendService(syncResult *L4NetLBSyncResult, hcL
 		EnableWeightedLoadBalancing: enableWeightedOnService,
 	}
 
-	bs, err := l4netlb.backendPool.EnsureL4BackendService(backendParams, l4netlb.svcLogger)
+	bs, wasUpdate, err := l4netlb.backendPool.EnsureL4BackendService(backendParams, l4netlb.svcLogger)
+	syncResult.GCEResourceUpdate.backendServiceUpdate = wasUpdate
 	if err != nil {
 		if utils.IsUnsupportedFeatureError(err, strongSessionAffinityFeatureName) {
 			syncResult.GCEResourceInError = annotations.BackendServiceResource
@@ -361,7 +383,8 @@ func (l4netlb *L4NetLB) ensureDualStackResources(result *L4NetLBSyncResult, node
 // - IPv4 Forwarding Rule
 // - IPv4 Firewall
 func (l4netlb *L4NetLB) ensureIPv4Resources(result *L4NetLBSyncResult, nodeNames []string, bsLink string) {
-	fr, ipAddrType, err := l4netlb.ensureIPv4ForwardingRule(bsLink)
+	fr, ipAddrType, wasUpdate, err := l4netlb.ensureIPv4ForwardingRule(bsLink)
+	result.GCEResourceUpdate.forwardingRuleUpdate = wasUpdate
 	if err != nil {
 		// User can misconfigure the forwarding rule if Network Tier will not match service level Network Tier.
 		result.GCEResourceInError = annotations.ForwardingRuleResource
@@ -417,7 +440,7 @@ func (l4netlb *L4NetLB) ensureIPv4NodesFirewall(nodeNames []string, ipAddress st
 		NodeNames:         nodeNames,
 		Network:           l4netlb.networkInfo,
 	}
-	result.Error = firewalls.EnsureL4LBFirewallForNodes(l4netlb.Service, &nodesFWRParams, l4netlb.cloud, l4netlb.recorder, fwLogger)
+	result.GCEResourceUpdate.firewallForNodesUpdate, result.Error = firewalls.EnsureL4LBFirewallForNodes(l4netlb.Service, &nodesFWRParams, l4netlb.cloud, l4netlb.recorder, fwLogger)
 	if result.Error != nil {
 		result.GCEResourceInError = annotations.FirewallRuleResource
 		result.Error = err

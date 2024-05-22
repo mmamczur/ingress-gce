@@ -321,7 +321,7 @@ func (b *Backends) DeleteSignedUrlKey(be *composite.BackendService, keyName stri
 }
 
 // EnsureL4BackendService creates or updates the backend service with the given name.
-func (b *Backends) EnsureL4BackendService(params L4BackendServiceParams, beLogger klog.Logger) (*composite.BackendService, error) {
+func (b *Backends) EnsureL4BackendService(params L4BackendServiceParams, beLogger klog.Logger) (*composite.BackendService, bool, error) {
 	start := time.Now()
 	beLogger = beLogger.WithValues("L4BackendServiceParams", params)
 	beLogger.V(2).Info("EnsureL4BackendService started")
@@ -333,11 +333,11 @@ func (b *Backends) EnsureL4BackendService(params L4BackendServiceParams, beLogge
 
 	key, err := composite.CreateKey(b.cloud, params.Name, meta.Regional)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	bs, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
 	if err != nil && !utils.IsNotFoundError(err) {
-		return nil, err
+		return nil, false, err
 	}
 	desc, err := utils.MakeL4LBServiceDescription(params.NamespacedName.String(), "", meta.VersionGA, false, utils.ILB)
 	if err != nil {
@@ -378,18 +378,19 @@ func (b *Backends) EnsureL4BackendService(params L4BackendServiceParams, beLogge
 		beLogger.V(2).Info("EnsureL4BackendService: creating backend service")
 		err := composite.CreateBackendService(b.cloud, key, expectedBS, beLogger)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		beLogger.V(2).Info("EnsureL4BackendService: created backend service successfully")
 		// We need to perform a GCE call to re-fetch the object we just created
 		// so that the "Fingerprint" field is filled in. This is needed to update the
 		// object without error. The lookup is also needed to populate the selfLink.
-		return composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+		createdBS, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+		return createdBS, true, err
 	}
 
 	if backendSvcEqual(expectedBS, bs, b.useConnectionTrackingPolicy, params.EnableWeightedLoadBalancing) {
 		beLogger.V(2).Info("EnsureL4BackendService: backend service did not change, skipping update")
-		return bs, nil
+		return bs, false, nil
 	}
 	if bs.ConnectionDraining != nil && bs.ConnectionDraining.DrainingTimeoutSec > 0 && params.Protocol == string(api_v1.ProtocolTCP) {
 		// only preserves user overridden timeout value when the protocol is TCP
@@ -401,11 +402,12 @@ func (b *Backends) EnsureL4BackendService(params L4BackendServiceParams, beLogge
 	// Copy backends to avoid detaching them during update. This could be replaced with a patch call in the future.
 	expectedBS.Backends = bs.Backends
 	if err := composite.UpdateBackendService(b.cloud, key, expectedBS, beLogger); err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	beLogger.V(2).Info("EnsureL4BackendService: updated backend service successfully")
 
-	return composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+	updatedBS, err := composite.GetBackendService(b.cloud, key, meta.VersionGA, beLogger)
+	return updatedBS, true, err
 }
 
 // backendSvcEqual returns true if the 2 BackendService objects are equal.
