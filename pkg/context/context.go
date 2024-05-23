@@ -146,6 +146,7 @@ type ControllerContextConfig struct {
 	EnableIngressRegionalExternal bool
 	EnableWeightedL4ILB           bool
 	EnableWeightedL4NetLB         bool
+	EnableL4NetLBNEGs             bool
 }
 
 // NewControllerContext returns a new shared set of informers.
