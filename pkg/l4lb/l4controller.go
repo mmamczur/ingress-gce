@@ -405,7 +405,7 @@ func (l4c *L4Controller) linkNEG(l4 *loadbalancers.L4, svcLogger klog.Logger) er
 	for _, zone := range zones {
 		groupKeys = append(groupKeys, backends.GroupKey{Zone: zone})
 	}
-	return l4c.NegLinker.Link(l4.ServicePort, groupKeys)
+	return l4c.NegLinker.Link(l4.ServicePort, groupKeys, false)
 }
 
 func (l4c *L4Controller) syncWrapper(key string) (err error) {

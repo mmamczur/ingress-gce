@@ -81,7 +81,7 @@ func NewInstanceGroupLinker(instancePool instancegroups.Manager, backendPool Poo
 }
 
 // Link implements Link.
-func (igl *instanceGroupLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+func (igl *instanceGroupLinker) Link(sp utils.ServicePort, groups []GroupKey, force bool) error {
 	var igLinks []string
 	for _, group := range groups {
 		ig, err := igl.instancePool.Get(sp.IGName(), group.Zone)

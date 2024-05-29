@@ -1748,7 +1748,7 @@ type fakeNEGLinker struct {
 	groups []backends.GroupKey
 }
 
-func (l *fakeNEGLinker) Link(sp utils.ServicePort, groups []backends.GroupKey) error {
+func (l *fakeNEGLinker) Link(sp utils.ServicePort, groups []backends.GroupKey, force bool) error {
 	l.called = true
 	l.sp = sp
 	l.groups = groups
@@ -1801,5 +1801,112 @@ func TestEnsureBackendLinkingWithInstanceGroups(t *testing.T) {
 
 	if negLinker.called {
 		t.Errorf("IG linking should not use NEG linker")
+	}
+}
+
+func TestShouldUseNEGBackends(t *testing.T) {
+	testCases := []struct {
+		desc           string
+		negsEnabled    bool
+		negAnnotation  string
+		finalizers     []string
+		backendService *composite.BackendService
+		expected       bool
+	}{
+		{
+			desc:        "NEGs not enabled",
+			negsEnabled: false,
+			expected:    false,
+		},
+		{
+			desc:          "NEGs not enabled with annotation present",
+			negsEnabled:   false,
+			negAnnotation: annotations.RBSEnabled,
+			expected:      false,
+		},
+		{
+			desc:          "NEGs enabled with annotation present",
+			negsEnabled:   true,
+			negAnnotation: annotations.RBSEnabled,
+			expected:      true,
+		},
+		{
+			desc:        "NEGs enabled with annotation not present but with finalizer V3",
+			negsEnabled: true,
+			finalizers:  []string{common.NetLBFinalizerV3},
+			expected:    true,
+		},
+		{
+			desc:        "NEGs enabled with annotation not present but with finalizer V2",
+			negsEnabled: true,
+			finalizers:  []string{common.NetLBFinalizerV2},
+			expected:    false,
+		},
+		{
+			desc:        "NEGs enabled with no annotations and no finalizers but with backend service with no backend service present",
+			negsEnabled: true,
+			finalizers:  []string{},
+			expected:    false,
+		},
+		{
+			desc:        "NEGs enabled with no annotations and no finalizers but with backend service with NEG backends",
+			negsEnabled: true,
+			finalizers:  []string{},
+			backendService: &composite.BackendService{
+				Backends: []*composite.Backend{
+					{Group: "https://www.googleapis.com/compute/v1/projects/test-project/zones/us-central1-c/networkEndpointGroups/neg"},
+				},
+			},
+			expected: true,
+		},
+		{
+			desc:        "NEGs enabled with no annotations and no finalizers but with backend service with InstanceGroup backends",
+			negsEnabled: true,
+			finalizers:  []string{},
+			backendService: &composite.BackendService{
+				Backends: []*composite.Backend{
+					{Group: "https://www.googleapis.com/compute/beta/projects/project-id/zones/us-central1-a/instanceGroups/example-group"},
+				},
+			},
+			expected: false,
+		},
+		{
+			desc:          "NEGs enabled with annotation to disable present and with finalizer V3",
+			negsEnabled:   true,
+			negAnnotation: annotations.RBSDisabled,
+			finalizers:    []string{common.NetLBFinalizerV3},
+			expected:      false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			controller := newL4NetLBServiceController()
+			controller.enableNEGSupport = tc.negsEnabled
+			svc := test.NewL4NetLBRBSService(8080)
+			if tc.negAnnotation != "" {
+				svc.Annotations[annotations.RBSNEGAnnotationKey] = tc.negAnnotation
+			}
+			svc.Finalizers = tc.finalizers
+
+			if tc.backendService != nil {
+				tc.backendService.Name = controller.namer.L4Backend(svc.Namespace, svc.Name)
+				key, err := composite.CreateKey(controller.ctx.Cloud, tc.backendService.Name, meta.Regional)
+				if err != nil {
+					t.Fatalf("failed to create the key for backend service err=%v", err)
+				}
+				err = composite.CreateBackendService(controller.ctx.Cloud, key, tc.backendService, klog.TODO())
+				if err != nil {
+					t.Fatalf("failed to create backend service err=%v", err)
+				}
+			}
+			result, err := controller.shouldUseNEGBackends(svc, klog.TODO())
+			if err != nil {
+				t.Errorf("shouldUseNEGBackends failed: %v", err)
+			}
+			if result != tc.expected {
+				t.Errorf("shouldUseNEGBackends returned wrong result, want: %v, got: %v", tc.expected, result)
+			}
+		})
+
 	}
 }

@@ -392,6 +392,18 @@ func (lc *L4NetLBController) hasRBSForwardingRule(svc *v1.Service, svcLogger klo
 	return existingFR != nil && existingFR.LoadBalancingScheme == string(cloud.SchemeExternal) && existingFR.BackendService != ""
 }
 
+func (lc *L4NetLBController) hasBackendServiceWithNEGs(svc *v1.Service, svcLogger klog.Logger) (bool, error) {
+	beName := lc.namer.L4Backend(svc.Namespace, svc.Name)
+	backendService, err := lc.backendPool.Get(beName, meta.VersionGA, meta.Regional, svcLogger)
+	if err != nil {
+		if utils.IsNotFoundError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(backendService.Backends) > 0 && strings.Contains(backendService.Backends[0].Group, "networkEndpointGroups"), nil
+}
+
 func (lc *L4NetLBController) checkHealth() error {
 	lastEnqueueTime := lc.enqueueTracker.Get()
 	lastSyncTime := lc.syncTracker.Get()
@@ -520,18 +532,9 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 	}
 	l4netlb := loadbalancers.NewL4NetLB(l4NetLBParams, svcLogger)
 
-	usesNegBackends := false
-
-	annotationSettingForNEGs := annotations.HasRBSNEGAnnotation(service)
-	if lc.enableNEGSupport && (annotationSettingForNEGs || utils.HasL4NetLBFinalizerV3(service)) {
-		if err := common.EnsureServiceFinalizer(service, common.NetLBFinalizerV3, lc.ctx.KubeClient, svcLogger); err != nil {
-			return &loadbalancers.L4NetLBSyncResult{Error: fmt.Errorf("Failed to attach L4 External LoadBalancer finalizer to service %s/%s, err %w", service.Namespace, service.Name, err)}
-		}
-		usesNegBackends = true
-	} else {
-		if err := common.EnsureServiceFinalizer(service, common.NetLBFinalizerV2, lc.ctx.KubeClient, svcLogger); err != nil {
-			return &loadbalancers.L4NetLBSyncResult{Error: fmt.Errorf("Failed to attach L4 External LoadBalancer finalizer to service %s/%s, err %w", service.Namespace, service.Name, err)}
-		}
+	usesNegBackends, err := lc.ensureFinalizer(service, svcLogger)
+	if err != nil {
+		return &loadbalancers.L4NetLBSyncResult{Error: err}
 	}
 
 	nodes, err := lc.zoneGetter.ListNodes(zonegetter.CandidateNodesFilter, svcLogger)
@@ -604,6 +607,47 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 	return syncResult
 }
 
+func (lc *L4NetLBController) ensureFinalizer(service *v1.Service, svcLogger klog.Logger) (useNEGBackends bool, err error) {
+	shouldUseNEGBackends, err := lc.shouldUseNEGBackends(service, svcLogger)
+	if err != nil {
+		return false, err
+	}
+	addFinalizer := common.NetLBFinalizerV2
+	removeFinalizer := common.NetLBFinalizerV3
+	if shouldUseNEGBackends {
+		addFinalizer = common.NetLBFinalizerV3
+		removeFinalizer = common.NetLBFinalizerV2
+	}
+
+	if err := common.EnsureServiceFinalizer(service, addFinalizer, lc.ctx.KubeClient, svcLogger); err != nil {
+		return shouldUseNEGBackends, fmt.Errorf("Failed to attach L4 External LoadBalancer finalizer to service %s/%s, err %w", service.Namespace, service.Name, err)
+	}
+	if err := common.EnsureDeleteServiceFinalizer(service, removeFinalizer, lc.ctx.KubeClient, svcLogger); err != nil {
+		return shouldUseNEGBackends, fmt.Errorf("Failed to remove L4 External LoadBalancer finalizer from service %s/%s, err %w", service.Namespace, service.Name, err)
+	}
+	return shouldUseNEGBackends, nil
+}
+
+func (lc *L4NetLBController) shouldUseNEGBackends(service *v1.Service, svcLogger klog.Logger) (bool, error) {
+	annotationSettingForNEGs := annotations.HasRBSNEGAnnotation(service)
+	annotationSettingForDisablingNEGs := annotations.HasRBSNEGDisabledAnnotation(service)
+	if lc.enableNEGSupport && !annotationSettingForDisablingNEGs {
+		if annotationSettingForNEGs || utils.HasL4NetLBFinalizerV3(service) {
+			return true, nil
+		}
+		if utils.HasL4NetLBFinalizerV2(service) {
+			return false, nil
+		}
+		// do the last check - if the backend service already has NEG backends then assume it is the NEG variant. This is to prevent problems with users that like to remove annotations and finalizers.
+		hasNEGBackends, err := lc.hasBackendServiceWithNEGs(service, svcLogger)
+		if err != nil {
+			return false, err
+		}
+		return hasNEGBackends, nil
+	}
+	return false, nil
+}
+
 func (lc *L4NetLBController) emitEnsuredDualStackEvent(service *v1.Service) {
 	var ipFamilies []string
 	for _, ipFamily := range service.Spec.IPFamilies {
@@ -635,16 +679,24 @@ func (lc *L4NetLBController) ensureBackendLinking(service *v1.Service, linkType 
 	}
 	// NEG backends should only be used for multinetwork services on the non default network.
 	if linkType == negLink {
+		forceNEGs := false
+		if service.Annotations[annotations.RBSNEGAnnotationKey] == annotations.RBSEnabled {
+			forceNEGs = true
+		}
 		svcLogger.V(2).Info("Linking backend service with NEGs for service")
 		servicePort.VMIPNEGEnabled = true
 		var groupKeys []backends.GroupKey
 		for _, zone := range zones {
 			groupKeys = append(groupKeys, backends.GroupKey{Zone: zone})
 		}
-		return lc.negLinker.Link(servicePort, groupKeys)
+		return lc.negLinker.Link(servicePort, groupKeys, forceNEGs)
 	} else if linkType == instanceGroupLink {
 		svcLogger.V(2).Info("Linking backend service with Instance Groups for service (uses default network)")
-		return lc.igLinker.Link(servicePort, lc.ctx.Cloud.ProjectID(), zones)
+		forceIGs := false
+		if service.Annotations[annotations.RBSNEGAnnotationKey] == annotations.RBSDisabled {
+			forceIGs = true
+		}
+		return lc.igLinker.Link(servicePort, lc.ctx.Cloud.ProjectID(), zones, forceIGs)
 	} else {
 		return fmt.Errorf("cannot link backend service - invalid backend link type %d", linkType)
 	}

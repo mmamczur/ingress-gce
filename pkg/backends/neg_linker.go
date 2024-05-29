@@ -15,6 +15,7 @@ package backends
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -60,7 +61,7 @@ func NewNEGLinker(
 }
 
 // Link implements Link.
-func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey, force bool) error {
 	version := befeatures.VersionFromServicePort(&sp)
 	var negSelfLinks []string
 	var err error
@@ -105,6 +106,16 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 		nl.logger.Error(err, fmt.Sprintf("Failed to merge backends from %#v and %#v", backendService.Backends, newBackends))
 		nl.logger.Info("Fall back to ensure backend service with newBackends.")
 		mergedBackend = newBackends
+	}
+	if force {
+		nl.logger.Info("Forcing backend service linking to NEGs.")
+		var onlyNEGBackends []*composite.Backend
+		for _, backend := range mergedBackend {
+			if strings.Contains(backend.Group, "networkEndpointGroups") {
+				onlyNEGBackends = append(onlyNEGBackends, backend)
+			}
+		}
+		mergedBackend = onlyNEGBackends
 	}
 
 	diff := diffBackends(backendService.Backends, mergedBackend, nl.logger)

@@ -15,6 +15,7 @@ package backends
 
 import (
 	"fmt"
+	"strings"
 
 	cloudprovider "github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -41,7 +42,7 @@ func NewRegionalInstanceGroupLinker(instancePool instancegroups.Manager, backend
 }
 
 // Link performs linking instance groups to regional backend service
-func (linker *RegionalInstanceGroupLinker) Link(sp utils.ServicePort, projectID string, zones []string) error {
+func (linker *RegionalInstanceGroupLinker) Link(sp utils.ServicePort, projectID string, zones []string, force bool) error {
 	linker.logger.V(2).Info("Link", "servicePort", sp, "projectID", projectID, "zones", zones)
 
 	var igLinks []string
@@ -65,7 +66,15 @@ func (linker *RegionalInstanceGroupLinker) Link(sp utils.ServicePort, projectID 
 		linker.logger.V(3).Info("No backends to add or remove, skipping update", "backendName", sp.BackendName())
 		return nil
 	}
-
+	if force {
+		var onlyIGackends []*composite.Backend
+		for _, backend := range bs.Backends {
+			if strings.Contains(backend.Group, "instanceGroups") {
+				onlyIGackends = append(onlyIGackends, backend)
+			}
+		}
+		bs.Backends = onlyIGackends
+	}
 	if len(removeIGs) != 0 {
 		var backendsWithoutRemoved []*composite.Backend
 		for _, b := range bs.Backends {
