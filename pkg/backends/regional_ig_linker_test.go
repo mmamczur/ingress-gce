@@ -80,18 +80,18 @@ func TestRegionalLink(t *testing.T) {
 	fakeBackendPool := NewPool(fakeGCE, l4Namer)
 	linker := newTestRegionalIgLinker(fakeGCE, fakeBackendPool, l4Namer)
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err == nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err == nil {
 		t.Fatalf("Linking when instances does not exist should return error")
 	}
 	if _, err := linker.instancePool.EnsureInstanceGroupsAndPorts(l4Namer.InstanceGroup(), []int64{sp.NodePort}); err != nil {
 		t.Fatalf("Unexpected error when ensuring IG for ServicePort %+v: %v", sp, err)
 	}
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err == nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err == nil {
 		t.Fatalf("Linking when backend service does not exist should return error")
 	}
 	createBackendService(t, sp, fakeBackendPool)
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link. Error: %v", err)
 	}
 
@@ -122,13 +122,13 @@ func TestRegionalUpdateLink(t *testing.T) {
 	}
 	createBackendService(t, sp, fakeBackendPool)
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 	// Add error hook to check that Link function will not call Backend Service Update when no IG was added
 	(fakeGCE.Compute().(*cloud.MockGCE)).MockRegionBackendServices.UpdateHook = test.UpdateRegionBackendServiceWithErrorHookUpdate
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 	be, err := fakeGCE.GetRegionBackendService(sp.BackendName(), fakeGCE.Region())
@@ -158,11 +158,11 @@ func TestRegionalUpdateLinkWithNewBackends(t *testing.T) {
 	}
 	createBackendService(t, sp, fakeBackendPool)
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone, usCentral1CZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone, usCentral1CZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 	be, err := fakeGCE.GetRegionBackendService(sp.BackendName(), fakeGCE.Region())
@@ -202,11 +202,11 @@ func TestRegionalUpdateLinkWithRemovedBackends(t *testing.T) {
 	}
 	createBackendService(t, sp, fakeBackendPool)
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone, usCentral1CZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone, usCentral1CZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 
-	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}); err != nil {
+	if err := linker.Link(sp, fakeGCE.ProjectID(), []string{usCentral1AZone}, false); err != nil {
 		t.Fatalf("Unexpected error in Link(_). Error: %v", err)
 	}
 	be, err := fakeGCE.GetRegionBackendService(sp.BackendName(), fakeGCE.Region())

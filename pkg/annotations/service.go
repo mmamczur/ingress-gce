@@ -123,6 +123,8 @@ const (
 	RBSAnnotationKey    = "cloud.google.com/l4-rbs"
 	RBSNEGAnnotationKey = "cloud.google.com/l4-rbs-neg"
 	RBSEnabled          = "enabled"
+
+	RBSDisabled = "disabled"
 	// StrongSessionAffinity is a restricted feature that is enabled on
 	// allow-listed projects only. If you need access to this feature for your
 	// External L4 Load Balancer, please contact Google Cloud support team.
@@ -286,6 +288,18 @@ func HasRBSNEGAnnotation(service *v1.Service) bool {
 	}
 
 	if val, ok := service.Annotations[RBSNEGAnnotationKey]; ok && val == RBSEnabled {
+		return true
+	}
+	return false
+}
+
+// HasRBSNEGDisabledAnnotation checks if the given service has the RBS NEG annotation with disabled value.
+func HasRBSNEGDisabledAnnotation(service *v1.Service) bool {
+	if service == nil {
+		return false
+	}
+
+	if val, ok := service.Annotations[RBSNEGAnnotationKey]; ok && val == RBSDisabled {
 		return true
 	}
 	return false

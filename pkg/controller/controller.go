@@ -421,10 +421,10 @@ func (lbc *LoadBalancerController) SyncBackends(state interface{}, ingLogger klo
 		var linkErr error
 		if sp.NEGEnabled {
 			// Link backend to NEG's if the backend has NEG enabled.
-			linkErr = lbc.negLinker.Link(sp, groupKeys)
+			linkErr = lbc.negLinker.Link(sp, groupKeys, false)
 		} else {
 			// Otherwise, link backend to IG's.
-			linkErr = lbc.igLinker.Link(sp, groupKeys)
+			linkErr = lbc.igLinker.Link(sp, groupKeys, false)
 		}
 		if linkErr != nil {
 			return linkErr
