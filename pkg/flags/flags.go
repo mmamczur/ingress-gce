@@ -132,6 +132,7 @@ var (
 		OverrideComputeAPIEndpoint               string
 		EnableIGMultiSubnetCluster               bool
 		EnableMultiSubnetCluster                 bool
+		NetLBSubsetSize                          int
 	}{
 		GCERateLimitScale: 1.0,
 	}
@@ -312,6 +313,7 @@ L7 load balancing. CSV values accepted. Example: -node-port-ranges=80,8080,400-5
 	flag.StringVar(&F.OverrideComputeAPIEndpoint, "override-compute-api-endpoint", "", "Override endpoint that is used to communicate to GCP compute APIs.")
 	flag.BoolVar(&F.EnableIGMultiSubnetCluster, "enable-ig-multi-subnet-cluster", false, "Enable Multi Subnet support for the controllers that use Instance Group backends.")
 	flag.BoolVar(&F.EnableMultiSubnetCluster, "enable-multi-subnet-cluster", false, "Enable Multi Subnet support for all controllers that are running.")
+	flag.IntVar(&F.NetLBSubsetSize, "net-lb-subset-size", 100, "size of the subset for External NEG backed RBS L4 LB.")
 }
 
 func Validate() {
