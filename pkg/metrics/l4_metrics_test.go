@@ -97,44 +97,48 @@ func TestExportNetLBMetric(t *testing.T) {
 	notExceedingPersistentErrorThresholdTime := time.Now().Add(-1*persistentErrorThresholdTime + 5*time.Minute)
 
 	newMetrics.SetL4NetLBService("svc-success-multinet-1", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: false, BackendType: L4BackendTypeNEG},
 		Status:                  StatusSuccess,
 	})
 	newMetrics.SetL4NetLBService("svc-success-all-labels", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: true},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: true, BackendType: L4BackendTypeNEG},
 		Status:                  StatusSuccess,
 	})
 	newMetrics.SetL4NetLBService("svc-success-multinet-2", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: true, StrongSessionAffinity: false, BackendType: L4BackendTypeNEG},
+		Status:                  StatusSuccess,
+	})
+	newMetrics.SetL4NetLBService("svc-success-neg", L4ServiceState{
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeNEG},
 		Status:                  StatusSuccess,
 	})
 	newMetrics.SetL4NetLBService("svc-user-error-ssa", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: true},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: true, BackendType: L4BackendTypeInstanceGroup},
 		Status:                  StatusUserError,
 	})
 	newMetrics.SetL4NetLBService("svc-error", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeInstanceGroup},
 		Status:                  StatusError,
 		FirstSyncErrorTime:      &notExceedingPersistentErrorThresholdTime,
 	})
 	newMetrics.SetL4NetLBService("svc-error", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeInstanceGroup},
 		Status:                  StatusError,
 		FirstSyncErrorTime:      &notExceedingPersistentErrorThresholdTime,
 	})
 	newMetrics.SetL4NetLBService("svc-threshold-check", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeInstanceGroup},
 		Status:                  StatusError,
 		FirstSyncErrorTime:      &pastPersistentErrorThresholdTime,
 	})
 	// check that updating later does not move FirstSyncErrorTime
 	newMetrics.SetL4NetLBService("svc-threshold-check", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeInstanceGroup},
 		Status:                  StatusError,
 		FirstSyncErrorTime:      &notExceedingPersistentErrorThresholdTime,
 	})
 	newMetrics.SetL4NetLBService("svc-single-stack", L4ServiceState{
-		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false},
+		L4FeaturesServiceLabels: L4FeaturesServiceLabels{Multinetwork: false, StrongSessionAffinity: false, BackendType: L4BackendTypeInstanceGroup},
 		L4DualStackServiceLabels: L4DualStackServiceLabels{
 			IPFamilies:     "IPv4",
 			IPFamilyPolicy: "SingleStack",
@@ -145,17 +149,18 @@ func TestExportNetLBMetric(t *testing.T) {
 
 	newMetrics.exportL4NetLBsMetrics()
 
-	verifyL4NetLBMetric(t, 2, StatusSuccess, isMultinetwork, disabledStrongSessionAffinity)
-	verifyL4NetLBMetric(t, 1, StatusSuccess, isMultinetwork, enabledStrongSessionAffinity)
-	verifyL4NetLBMetric(t, 1, StatusUserError, notMultinetwork, enabledStrongSessionAffinity)
-	verifyL4NetLBMetric(t, 2, StatusError, notMultinetwork, disabledStrongSessionAffinity)
-	verifyL4NetLBMetric(t, 1, StatusPersistentError, notMultinetwork, disabledStrongSessionAffinity)
+	verifyL4NetLBMetric(t, 2, StatusSuccess, isMultinetwork, disabledStrongSessionAffinity, L4BackendTypeNEG)
+	verifyL4NetLBMetric(t, 1, StatusSuccess, isMultinetwork, enabledStrongSessionAffinity, L4BackendTypeNEG)
+	verifyL4NetLBMetric(t, 1, StatusSuccess, notMultinetwork, disabledStrongSessionAffinity, L4BackendTypeNEG)
+	verifyL4NetLBMetric(t, 1, StatusUserError, notMultinetwork, enabledStrongSessionAffinity, L4BackendTypeInstanceGroup)
+	verifyL4NetLBMetric(t, 2, StatusError, notMultinetwork, disabledStrongSessionAffinity, L4BackendTypeInstanceGroup)
+	verifyL4NetLBMetric(t, 1, StatusPersistentError, notMultinetwork, disabledStrongSessionAffinity, L4BackendTypeInstanceGroup)
 }
 
-func verifyL4NetLBMetric(t *testing.T, expectedCount int, status L4ServiceStatus, multinet string, strongSessionAffinity string) {
-	countFloat := testutil.ToFloat64(l4NetLBCount.With(prometheus.Labels{l4LabelStatus: string(status), l4LabelMultinet: multinet, l4LabelStrongSessionAffinity: strongSessionAffinity}))
+func verifyL4NetLBMetric(t *testing.T, expectedCount int, status L4ServiceStatus, multinet string, strongSessionAffinity string, backendType L4BackendType) {
+	countFloat := testutil.ToFloat64(l4NetLBCount.With(prometheus.Labels{l4LabelStatus: string(status), l4LabelMultinet: multinet, l4LabelStrongSessionAffinity: strongSessionAffinity, l4LabelNetLBBackendType: string(backendType)}))
 	actualCount := int(math.Round(countFloat))
 	if expectedCount != actualCount {
-		t.Errorf("expected value %d but got %d", expectedCount, actualCount)
+		t.Errorf("expected value %d but got %d for status: %q, multinet: %q, ssa: %q, backendType: %q", expectedCount, actualCount, status, multinet, strongSessionAffinity, backendType)
 	}
 }

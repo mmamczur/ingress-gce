@@ -89,7 +89,8 @@ func NewL4ILBSyncResult(syncType string, startTime time.Time, svc *corev1.Servic
 		StartTime:   startTime,
 		SyncType:    syncType,
 		// Internal Load Balancer doesn't support strong session affinity (passing `false` all along)
-		MetricsState: metrics.InitServiceMetricsState(svc, &startTime, isMultinetService, false),
+		// It also only supports NEG backends so setting it to NEG.
+		MetricsState: metrics.InitServiceMetricsState(svc, &startTime, isMultinetService, false, metrics.L4BackendTypeNEG),
 	}
 
 	// If service already has an IP assigned, treat it as an update instead of a new Loadbalancer.

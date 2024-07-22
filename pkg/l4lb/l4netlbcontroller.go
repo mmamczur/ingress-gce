@@ -508,18 +508,6 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 		svcLogger.Info("Finished syncing L4 NetLB RBS service", "timeTaken", time.Since(startTime))
 	}()
 
-	l4NetLBParams := &loadbalancers.L4NetLBParams{
-		Service:                      service,
-		Cloud:                        lc.ctx.Cloud,
-		Namer:                        lc.namer,
-		Recorder:                     lc.ctx.Recorder(service.Namespace),
-		DualStackEnabled:             lc.enableDualStack,
-		StrongSessionAffinityEnabled: lc.enableStrongSessionAffinity,
-		NetworkResolver:              lc.networkResolver,
-		EnableWeightedLB:             lc.ctx.EnableWeightedL4NetLB,
-	}
-	l4netlb := loadbalancers.NewL4NetLB(l4NetLBParams, svcLogger)
-
 	usesNegBackends := false
 
 	annotationSettingForNEGs := annotations.HasRBSNEGAnnotation(service)
@@ -533,6 +521,19 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 			return &loadbalancers.L4NetLBSyncResult{Error: fmt.Errorf("Failed to attach L4 External LoadBalancer finalizer to service %s/%s, err %w", service.Namespace, service.Name, err)}
 		}
 	}
+
+	l4NetLBParams := &loadbalancers.L4NetLBParams{
+		Service:                      service,
+		Cloud:                        lc.ctx.Cloud,
+		Namer:                        lc.namer,
+		Recorder:                     lc.ctx.Recorder(service.Namespace),
+		DualStackEnabled:             lc.enableDualStack,
+		StrongSessionAffinityEnabled: lc.enableStrongSessionAffinity,
+		NetworkResolver:              lc.networkResolver,
+		EnableWeightedLB:             lc.ctx.EnableWeightedL4NetLB,
+		UseNEGs:                      usesNegBackends,
+	}
+	l4netlb := loadbalancers.NewL4NetLB(l4NetLBParams, svcLogger)
 
 	nodes, err := lc.zoneGetter.ListNodes(zonegetter.CandidateNodesFilter, svcLogger)
 	if err != nil {
@@ -678,6 +679,11 @@ func (lc *L4NetLBController) garbageCollectRBSNetLB(key string, svc *v1.Service,
 		svcLogger.Info("Finished deleting L4 NetLB service", "timeTaken", time.Since(startTime))
 	}()
 
+	usesNEGs := false
+	if utils.HasL4NetLBFinalizerV3(svc) {
+		usesNEGs = true
+	}
+
 	l4NetLBParams := &loadbalancers.L4NetLBParams{
 		Service:                      svc,
 		Cloud:                        lc.ctx.Cloud,
@@ -687,6 +693,7 @@ func (lc *L4NetLBController) garbageCollectRBSNetLB(key string, svc *v1.Service,
 		StrongSessionAffinityEnabled: lc.enableStrongSessionAffinity,
 		NetworkResolver:              lc.networkResolver,
 		EnableWeightedLB:             lc.ctx.EnableWeightedL4NetLB,
+		UseNEGs:                      usesNEGs,
 	}
 	l4netLB := loadbalancers.NewL4NetLB(l4NetLBParams, svcLogger)
 	lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeNormal, "DeletingLoadBalancer",
