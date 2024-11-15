@@ -49,6 +49,13 @@ func TestNodeStatusChanged(t *testing.T) {
 			},
 			false,
 		},
+		{
+			"pod CIDR change",
+			func(node *api_v1.Node) {
+				node.Spec.PodCIDR = "10.0.1.0/24"
+			},
+			true,
+		},
 	}
 
 	for _, tc := range testCases {
