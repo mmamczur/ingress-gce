@@ -4609,6 +4609,56 @@ func UpdateBackendService(gceCloud *gce.Cloud, key *meta.Key, backendService *Ba
 	}
 }
 
+func PatchBackendService(gceCloud *gce.Cloud, key *meta.Key, backendService *BackendService, logger klog.Logger) error {
+	ctx, cancel := cloudprovider.ContextWithCallTimeout()
+	defer cancel()
+	mc := compositemetrics.NewMetricContext("BackendService", "patch", key.Region, key.Zone, string(backendService.Version))
+	switch backendService.Version {
+	case meta.VersionAlpha:
+		alpha, err := backendService.ToAlpha()
+		if err != nil {
+			return err
+		}
+		alphaLogger := logger.WithValues("name", alpha.Name)
+		switch key.Type() {
+		case meta.Regional:
+			alphaLogger.Info("Patching alpha region BackendService")
+			return mc.Observe(gceCloud.Compute().AlphaRegionBackendServices().Patch(ctx, key, alpha))
+		default:
+			alphaLogger.Info("Patching alpha BackendService")
+			return mc.Observe(gceCloud.Compute().AlphaBackendServices().Patch(ctx, key, alpha))
+		}
+	case meta.VersionBeta:
+		beta, err := backendService.ToBeta()
+		if err != nil {
+			return err
+		}
+		betaLogger := logger.WithValues("name", beta.Name)
+		switch key.Type() {
+		case meta.Regional:
+			betaLogger.Info("Patching beta region BackendService")
+			return mc.Observe(gceCloud.Compute().BetaRegionBackendServices().Patch(ctx, key, beta))
+		default:
+			betaLogger.Info("Patching beta BackendService")
+			return mc.Observe(gceCloud.Compute().BetaBackendServices().Patch(ctx, key, beta))
+		}
+	default:
+		ga, err := backendService.ToGA()
+		if err != nil {
+			return err
+		}
+		gaLogger := logger.WithValues("name", ga.Name)
+		switch key.Type() {
+		case meta.Regional:
+			gaLogger.Info("Patching ga region BackendService")
+			return mc.Observe(gceCloud.Compute().RegionBackendServices().Patch(ctx, key, ga))
+		default:
+			gaLogger.Info("Patching ga BackendService")
+			return mc.Observe(gceCloud.Compute().BackendServices().Patch(ctx, key, ga))
+		}
+	}
+}
+
 func DeleteBackendService(gceCloud *gce.Cloud, key *meta.Key, version meta.Version, logger klog.Logger) error {
 	logger = logger.WithValues("name", key.Name)
 	ctx, cancel := cloudprovider.ContextWithCallTimeout()

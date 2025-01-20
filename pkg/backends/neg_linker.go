@@ -46,11 +46,11 @@ type negLinker struct {
 var _ Linker = (*negLinker)(nil)
 
 func NewNEGLinker(
-		backendPool *Pool,
-		negGetter NEGGetter,
-		cloud *gce.Cloud,
-		svcNegLister cache.Indexer,
-		logger klog.Logger,
+	backendPool *Pool,
+	negGetter NEGGetter,
+	cloud *gce.Cloud,
+	svcNegLister cache.Indexer,
+	logger klog.Logger,
 ) Linker {
 	return &negLinker{
 		backendPool:                    backendPool,
@@ -132,7 +132,7 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 
 	backendService.Backends = mergedBackend
 	diffBackendsTime := time.Now()
-	err = composite.UpdateBackendService(nl.cloud, key, backendService, nl.logger)
+	err = composite.PatchBackendService(nl.cloud, key, backendService, nl.logger)
 	updateBSTime := time.Now()
 	nl.logger.V(2).Info("LinkerTimes (NEG)", "getLinksTime", getLinksTime.Sub(startTime), "getBackendServiceTime", getBackendServiceTime.Sub(getLinksTime), "calcBackendsTime", calcBackendsTime.Sub(getLinksTime), "phase1Time", phase1Time.Sub(calcBackendsTime), "diffBackendsTime", diffBackendsTime.Sub(phase1Time), "updateBSTime", updateBSTime.Sub(diffBackendsTime))
 
