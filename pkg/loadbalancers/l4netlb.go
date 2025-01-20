@@ -276,11 +276,13 @@ func (l4netlb *L4NetLB) EnsureFrontend(nodeNames []string, svc *corev1.Service) 
 		return result
 	}
 
+	frTime := time.Now()
 	if l4netlb.enableDualStack {
 		l4netlb.ensureDualStackResources(result, nodeNames, bsLink)
 	} else {
 		l4netlb.ensureIPv4Resources(result, nodeNames, bsLink)
 	}
+	l4netlb.svcLogger.V(2).Info("Create FR", "time", time.Now().Sub(frTime))
 
 	return result
 }
@@ -365,7 +367,9 @@ func (l4netlb *L4NetLB) provideBackendService(syncResult *L4NetLBSyncResult, hcL
 		LocalityLbPolicy:         localityLbPolicy,
 	}
 
+	bsStartTime := time.Now()
 	bs, wasUpdate, err := l4netlb.backendPool.EnsureL4BackendService(backendParams, l4netlb.svcLogger)
+	l4netlb.svcLogger.V(2).Info("Create BS", "time", time.Now().Sub(bsStartTime), "update", wasUpdate)
 	syncResult.GCEResourceUpdate.SetBackendService(wasUpdate)
 	if err != nil {
 		if utils.IsUnsupportedFeatureError(err, strongSessionAffinityFeatureName) {

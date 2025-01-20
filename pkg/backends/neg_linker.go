@@ -15,6 +15,7 @@ package backends
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -45,11 +46,11 @@ type negLinker struct {
 var _ Linker = (*negLinker)(nil)
 
 func NewNEGLinker(
-	backendPool *Pool,
-	negGetter NEGGetter,
-	cloud *gce.Cloud,
-	svcNegLister cache.Indexer,
-	logger klog.Logger,
+		backendPool *Pool,
+		negGetter NEGGetter,
+		cloud *gce.Cloud,
+		svcNegLister cache.Indexer,
+		logger klog.Logger,
 ) Linker {
 	return &negLinker{
 		backendPool:                    backendPool,
@@ -63,6 +64,7 @@ func NewNEGLinker(
 
 // Link implements Link.
 func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
+	startTime := time.Now()
 	version := befeatures.VersionFromServicePort(&sp)
 
 	negSelfLinks, err := nl.getNegSelfLinks(sp, groups)
@@ -77,11 +79,12 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 	if err != nil {
 		return err
 	}
+	getLinksTime := time.Now()
 	backendService, err := composite.GetBackendService(nl.cloud, key, version, nl.logger)
 	if err != nil {
 		return err
 	}
-
+	getBackendServiceTime := time.Now()
 	newBackends := backendsForNEGs(negSelfLinks.negsToAdd, &sp)
 	// Historically, we merged the old backends with the new backends to ensure
 	// that we don't detach NEGs when zones contract. Given that now we primarily
@@ -99,7 +102,7 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 		nl.logger.Info("Fall back to ensure backend service with newBackends.")
 		mergedBackend = newBackends
 	}
-
+	calcBackendsTime := time.Now()
 	// Filter out backends from to-be-deleted NEGs if EnableMultiSubnetClusterPhase1=true.
 	if nl.enableMultiSubnetClusterPhase1 {
 		filteredBackends := mergedBackend
@@ -118,6 +121,8 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 		mergedBackend = filteredBackends
 	}
 
+	phase1Time := time.Now()
+
 	diff := diffBackends(backendService.Backends, mergedBackend, nl.logger)
 	if diff.isEqual() {
 		nl.logger.V(2).Info("No changes in backends for service port", "servicePort", sp.ID)
@@ -126,7 +131,12 @@ func (nl *negLinker) Link(sp utils.ServicePort, groups []GroupKey) error {
 	nl.logger.V(2).Info("Backends changed for service port", "servicePort", sp.ID, "removing", diff.toRemove(), "adding", diff.toAdd(), "changed", diff.changed)
 
 	backendService.Backends = mergedBackend
-	return composite.UpdateBackendService(nl.cloud, key, backendService, nl.logger)
+	diffBackendsTime := time.Now()
+	err = composite.UpdateBackendService(nl.cloud, key, backendService, nl.logger)
+	updateBSTime := time.Now()
+	nl.logger.V(2).Info("LinkerTimes (NEG)", "getLinksTime", getLinksTime.Sub(startTime), "getBackendServiceTime", getBackendServiceTime.Sub(getLinksTime), "calcBackendsTime", calcBackendsTime.Sub(getLinksTime), "phase1Time", phase1Time.Sub(calcBackendsTime), "diffBackendsTime", diffBackendsTime.Sub(phase1Time), "updateBSTime", updateBSTime.Sub(diffBackendsTime))
+
+	return err
 }
 
 type backendNegUrls struct {

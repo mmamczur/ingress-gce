@@ -23,15 +23,7 @@ PKG := k8s.io/ingress-gce
 # for each BINARY.
 # TODO(bannai):  404-server will be deprecated by 404-server-with-metrics in a follow-on checkin
 CONTAINER_BINARIES ?= \
-	404-server \
-	404-server-with-metrics \
-	e2e-test \
-	echo \
-	fuzzer \
-	glbc \
-	workload-controller \
-	workload-daemon \
-	check-gke-ingress
+	glbc
 
 # Latest commit hash for current branch.
 GIT_COMMIT := $(shell git rev-parse HEAD)
