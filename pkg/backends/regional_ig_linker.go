@@ -15,6 +15,7 @@ package backends
 
 import (
 	"fmt"
+	"time"
 
 	cloudprovider "github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -54,10 +55,12 @@ func (linker *RegionalInstanceGroupLinker) Link(sp utils.ServicePort, projectID 
 	// TODO(cheungdavid): Create regional ig linker logger that contains backendName,
 	// backendVersion, and backendScope before passing to backendPool.Get().
 	// See example in backendSyncer.ensureBackendService().
+	getBackendServiceStart := time.Now()
 	bs, err := linker.backendPool.Get(sp.BackendName(), meta.VersionGA, meta.Regional, linker.logger)
 	if err != nil {
 		return err
 	}
+	getBackendServiceTime := time.Now().Sub(getBackendServiceStart)
 	addIGs, removeIGs, err := getInstanceGroupsToAddAndRemove(bs, igLinks, linker.logger)
 	if err != nil {
 		return err
@@ -89,8 +92,11 @@ func (linker *RegionalInstanceGroupLinker) Link(sp utils.ServicePort, projectID 
 	}
 
 	linker.logger.V(3).Info("Update Backend", "backendName", sp.BackendName(), "addedBackends", len(addIGs), "totalBackends", len(bs.Backends))
+	updateBackendServiceStart := time.Now()
 	if err := linker.backendPool.Update(bs, linker.logger); err != nil {
 		return fmt.Errorf("updating backend service %s for IG failed, err:%w", sp.BackendName(), err)
 	}
+	updateBackendServiceTime := time.Now().Sub(updateBackendServiceStart)
+	linker.logger.V(2).Info("LinkerTimes (IG)", "getBackendServiceTime", getBackendServiceTime, "updateBackendServiceTime", updateBackendServiceTime)
 	return nil
 }
