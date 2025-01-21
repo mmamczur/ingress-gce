@@ -605,6 +605,7 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 	//}
 	//}()
 	svcKey := utils.ServiceKeyFunc(service.Namespace, service.Name)
+	svcLogger.V(2).Info("Enqueue backend link")
 	lc.backendsQueue.Enqueue(svcKey)
 
 	err = updateServiceStatus(lc.ctx, service, syncResult.Status, svcLogger)
