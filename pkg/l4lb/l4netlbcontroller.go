@@ -709,6 +709,8 @@ func (lc *L4NetLBController) backendLinkingWrapper(key string) (err error) {
 	syncTrackingId := rand.Int31()
 	svcLogger := lc.logger.WithValues("serviceKey", key, "syncId", syncTrackingId)
 
+	svcLogger.V(2).Info("Processing backend linking")
+
 	svc, exists, err := lc.ctx.Services().GetByKey(key)
 	if err != nil {
 		return fmt.Errorf("failed to lookup L4 External LoadBalancer service for key %s : %w", key, err)
@@ -717,7 +719,7 @@ func (lc *L4NetLBController) backendLinkingWrapper(key string) (err error) {
 		svcLogger.V(3).Info("Ignoring sync of non-existent service")
 		return nil
 	}
-	if lc.needsDeletion(svc, svcLogger) {
+	if svc.ObjectMeta.DeletionTimestamp != nil {
 		return nil
 	}
 	err = lc.ensureBackendLinking(svc, negLink, svcLogger)
