@@ -60,6 +60,7 @@ type backendLinkType int64
 type L4NetLBController struct {
 	ctx             *context.ControllerContext
 	svcQueue        utils.TaskQueue
+	backendsQueue   utils.TaskQueue
 	networkResolver network.Resolver
 	stopCh          <-chan struct{}
 
@@ -135,7 +136,8 @@ func NewL4NetLBController(
 	}
 	l4netLBc.networkResolver = network.NewNetworksResolver(networkLister, gkeNetworkParamSetLister, adapter, ctx.EnableMultinetworking, logger)
 	l4netLBc.negLinker = backends.NewNEGLinker(l4netLBc.backendPool, negtypes.NewAdapter(ctx.Cloud), ctx.Cloud, ctx.SvcNegInformer.GetIndexer(), logger)
-	l4netLBc.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("l4netLB", "services", ctx.NumL4NetLBWorkers, l4netLBc.syncWrapper, logger)
+	l4netLBc.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("l4netLB", "services", 10, l4netLBc.syncWrapper, logger)
+	l4netLBc.backendsQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("l4netLBBackends", "serviceBackends", 10, l4netLBc.backendLinkingWrapper, logger)
 
 	ctx.ServiceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -441,6 +443,7 @@ func (lc *L4NetLBController) Run() {
 
 	lc.logger.Info("Running L4 Net Controller", "numWorkers", lc.ctx.NumL4NetLBWorkers)
 	lc.svcQueue.Run()
+	lc.backendsQueue.Run()
 
 	<-lc.stopCh
 }
@@ -448,6 +451,7 @@ func (lc *L4NetLBController) Run() {
 func (lc *L4NetLBController) shutdown() {
 	lc.logger.Info("Shutting down l4NetLBController")
 	lc.svcQueue.Shutdown()
+	lc.backendsQueue.Shutdown()
 }
 
 func (lc *L4NetLBController) syncWrapper(key string) (err error) {
@@ -587,19 +591,21 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 		return syncResult
 	}
 
-	linkType := instanceGroupLink
-	if isMultinet || usesNegBackends {
-		linkType = negLink
-	}
+	//linkType := instanceGroupLink
+	//if isMultinet || usesNegBackends {
+	//	linkType = negLink
+	//}
 
 	//go func() {
-	if err = lc.ensureBackendLinking(service, linkType, svcLogger); err != nil {
-		lc.ctx.Recorder(service.Namespace).Eventf(service, v1.EventTypeWarning, "SyncExternalLoadBalancerFailed",
-			"Error linking backends to backend service, err: %v", err)
-		syncResult.Error = err
-		svcLogger.V(2).Error(err, "failed to link backends")
-	}
+	//if err = lc.ensureBackendLinking(service, linkType, svcLogger); err != nil {
+	//	lc.ctx.Recorder(service.Namespace).Eventf(service, v1.EventTypeWarning, "SyncExternalLoadBalancerFailed",
+	//		"Error linking backends to backend service, err: %v", err)
+	//	syncResult.Error = err
+	//	svcLogger.V(2).Error(err, "failed to link backends")
+	//}
 	//}()
+	svcKey := utils.ServiceKeyFunc(service.Namespace, service.Name)
+	lc.backendsQueue.Enqueue(svcKey)
 
 	err = updateServiceStatus(lc.ctx, service, syncResult.Status, svcLogger)
 	if err != nil {
@@ -696,6 +702,29 @@ func (lc *L4NetLBController) ensureBackendLinking(service *v1.Service, linkType 
 	} else {
 		return fmt.Errorf("cannot link backend service - invalid backend link type %d", linkType)
 	}
+}
+
+func (lc *L4NetLBController) backendLinkingWrapper(key string) (err error) {
+	syncTrackingId := rand.Int31()
+	svcLogger := lc.logger.WithValues("serviceKey", key, "syncId", syncTrackingId)
+
+	svc, exists, err := lc.ctx.Services().GetByKey(key)
+	if err != nil {
+		return fmt.Errorf("failed to lookup L4 External LoadBalancer service for key %s : %w", key, err)
+	}
+	if !exists || svc == nil {
+		svcLogger.V(3).Info("Ignoring sync of non-existent service")
+		return nil
+	}
+	if lc.needsDeletion(svc, svcLogger) {
+		return nil
+	}
+	err = lc.ensureBackendLinking(svc, negLink, svcLogger)
+	if err != nil {
+		lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "SyncExternalLoadBalancerFailed",
+			"Error linking backends to backend service, err: %v", err)
+	}
+	return skipUserError(err, svcLogger)
 }
 
 func (lc *L4NetLBController) ensureInstanceGroups(service *v1.Service, nodeNames []string, svcLogger klog.Logger) error {
