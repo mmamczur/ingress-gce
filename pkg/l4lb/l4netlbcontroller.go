@@ -592,12 +592,14 @@ func (lc *L4NetLBController) syncInternal(service *v1.Service, svcLogger klog.Lo
 		linkType = negLink
 	}
 
+	//go func() {
 	if err = lc.ensureBackendLinking(service, linkType, svcLogger); err != nil {
 		lc.ctx.Recorder(service.Namespace).Eventf(service, v1.EventTypeWarning, "SyncExternalLoadBalancerFailed",
 			"Error linking backends to backend service, err: %v", err)
 		syncResult.Error = err
-		return syncResult
+		svcLogger.V(2).Error(err, "failed to link backends")
 	}
+	//}()
 
 	err = updateServiceStatus(lc.ctx, service, syncResult.Status, svcLogger)
 	if err != nil {
