@@ -34,7 +34,7 @@ const (
 	// Max number of subsets in ExternalTrafficPolicy:Local
 	maxSubsetSizeLocal = 250
 	// Max number of subsets in ExternalTrafficPolicy:Cluster, which is the default mode.
-	maxSubsetSizeDefault = 25
+	maxSubsetSizeDefault = 250
 	// Max number of subsets for NetLB in ExternalTrafficPolicy:Local
 	maxSubsetSizeNetLBLocal = 1000
 	// Max number of subsets for NetLB in ExternalTrafficPolicy:Cluster
