@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/ingress-gce/pkg/annotations"
+	negv1beta1 "k8s.io/ingress-gce/pkg/apis/svcneg/v1beta1"
 	"k8s.io/ingress-gce/pkg/backends"
 	"k8s.io/ingress-gce/pkg/context"
 	"k8s.io/ingress-gce/pkg/forwardingrules"
@@ -178,7 +179,77 @@ func NewILBController(ctx *context.ControllerContext, stopCh <-chan struct{}, lo
 		},
 	})
 
+	ctx.SvcNegInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			svcNEG := obj.(*negv1beta1.ServiceNetworkEndpointGroup)
+			logger.V(3).Info("ServiceNetworkEndpointGroup add", "name", svcNEG.Name)
+			svcKey, ok := getSvcOwnerOfSvcNEG(svcNEG)
+			if !ok {
+				return
+			}
+			svcLogger := logger.WithValues("serviceKey", svcKey)
+			obj, exists, err := ctx.ServiceInformer.GetStore().GetByKey(svcKey)
+			if err != nil {
+				return
+			}
+			if !exists {
+				return
+			}
+			svc := obj.(*v1.Service)
+			needsILB, _ := annotations.WantsL4ILB(svc)
+			if !needsILB {
+				return
+			}
+			svcLogger.V(3).Info("NEGs added for service, triggering resync")
+			l4c.svcQueue.Enqueue(svc)
+		},
+		UpdateFunc: func(old, cur interface{}) {
+			curSvcNEG := cur.(*negv1beta1.ServiceNetworkEndpointGroup)
+			oldSvcNEG := old.(*negv1beta1.ServiceNetworkEndpointGroup)
+			logger.V(3).Info("ServiceNetworkEndpointGroup update", "name", curSvcNEG.Name)
+			svcKey, ok := getSvcOwnerOfSvcNEG(curSvcNEG)
+			if !ok {
+				return
+			}
+			svcLogger := logger.WithValues("serviceKey", svcKey)
+			obj, exists, err := ctx.ServiceInformer.GetStore().GetByKey(svcKey)
+			if err != nil {
+				return
+			}
+			if !exists {
+				return
+			}
+			svc := obj.(*v1.Service)
+			needsILB, _ := annotations.WantsL4ILB(svc)
+			if !needsILB {
+				return
+			}
+			if !reflect.DeepEqual(curSvcNEG.Status.NetworkEndpointGroups, oldSvcNEG.Status.NetworkEndpointGroups) {
+				svcLogger.V(3).Info("NEGs changed for service, triggering resync")
+				l4c.svcQueue.Enqueue(svc)
+			}
+		},
+	})
+
+	logger.V(3).Info("set up SvcNegInformer event handlers")
+
 	return l4c
+}
+
+func getSvcOwnerOfSvcNEG(svcNEG *negv1beta1.ServiceNetworkEndpointGroup) (string, bool) {
+	if len(svcNEG.OwnerReferences) > 0 {
+		if svcNEG.OwnerReferences[0].Kind != "Service" {
+			return "", false
+		}
+		svcName := svcNEG.Name
+		svcNamespace := svcNEG.Namespace
+		if svcNamespace == "" {
+			svcNamespace = "default"
+		}
+		svcKey := utils.ServiceKeyFunc(svcNamespace, svcName)
+		return svcKey, true
+	}
+	return "", false
 }
 
 func (l4c *L4Controller) SystemHealth() error {
