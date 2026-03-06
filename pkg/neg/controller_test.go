@@ -1315,6 +1315,15 @@ func TestMergeVmIpNEGsPortInfo(t *testing.T) {
 	serviceInternalLoadBalancerClass := newL4LBServiceWithLoadBalancerClass(controller, l4annotations.RegionalInternalLoadBalancerClass)
 	serviceInternalLoadBalancerClass.Finalizers = append(serviceInternalLoadBalancerClass.Finalizers, common.ILBFinalizerV2)
 
+	serviceCustomNegLBInternal := newL4LBServiceWithLoadBalancerClass(controller, l4annotations.CustomNegLoadBalancerClass)
+	serviceCustomNegLBInternal.Annotations[l4annotations.ServiceAnnotationLoadBalancerType] = string(l4annotations.LBTypeInternal)
+
+	serviceCustomNegLBExternal := newL4LBServiceWithLoadBalancerClass(controller, l4annotations.CustomNegLoadBalancerClass)
+	serviceCustomNegLBExternal.Annotations[l4annotations.ServiceAnnotationLoadBalancerType] = string(l4annotations.LBTypeExternal)
+
+	serviceCustomNegLBExternalWithoutAnnotation := newL4LBServiceWithLoadBalancerClass(controller, l4annotations.CustomNegLoadBalancerClass)
+	delete(serviceCustomNegLBExternalWithoutAnnotation.Annotations, l4annotations.ServiceAnnotationLoadBalancerType)
+
 	testCases := []struct {
 		desc           string
 		svc            *apiv1.Service
@@ -1390,6 +1399,24 @@ func TestMergeVmIpNEGsPortInfo(t *testing.T) {
 			networkInfo:    defaultNetwork,
 			runL4ILB:       true,
 			wantSvcPortMap: negtypes.NewPortInfoMapForVMIPNEG(testServiceNamespace, testServiceName, controller.l4Namer, true, defaultNetwork, negtypes.L4InternalLB),
+		},
+		{
+			desc:           "Service with custom-neg-load-balancer loadBalancerClass (internal)",
+			svc:            serviceCustomNegLBInternal,
+			networkInfo:    defaultNetwork,
+			wantSvcPortMap: negtypes.NewPortInfoMapForVMIPNEG(testServiceNamespace, testServiceName, controller.l4Namer, true, defaultNetwork, negtypes.L4InternalLB),
+		},
+		{
+			desc:           "Service with custom-neg-load-balancer loadBalancerClass (external)",
+			svc:            serviceCustomNegLBExternal,
+			networkInfo:    defaultNetwork,
+			wantSvcPortMap: negtypes.NewPortInfoMapForVMIPNEG(testServiceNamespace, testServiceName, controller.l4Namer, true, defaultNetwork, negtypes.L4ExternalLB),
+		},
+		{
+			desc:           "Service with custom-neg-load-balancer loadBalancerClass (external without annotation)",
+			svc:            serviceCustomNegLBExternalWithoutAnnotation,
+			networkInfo:    defaultNetwork,
+			wantSvcPortMap: negtypes.NewPortInfoMapForVMIPNEG(testServiceNamespace, testServiceName, controller.l4Namer, true, defaultNetwork, negtypes.L4ExternalLB),
 		},
 	}
 
