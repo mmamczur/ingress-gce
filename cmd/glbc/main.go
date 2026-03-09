@@ -661,6 +661,12 @@ func runL4Controllers(ctx *ingctx.ControllerContext, systemHealth *systemhealth.
 		logger.V(0).Info("L4NetLB controller started")
 	}
 
+	if flags.F.RunL4CustomLBController {
+		customNegLBController := l4lb.NewCustomNegLBController(ctx, option.stopCh, logger)
+		runWithWg(customNegLBController.Run, option.wg)
+		logger.V(0).Info("Custom NEG LB controller started")
+	}
+
 	ctx.Start(option.stopCh)
 }
 
