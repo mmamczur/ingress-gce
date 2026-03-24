@@ -62,6 +62,8 @@ var F = struct {
 	DefaultSvc                string
 	DefaultSvcHealthCheckPath string
 	DefaultSvcPortName        string
+	DynamicConfigFilePath     string
+	DynamicConfigPeriod       time.Duration
 	GCEOperationPollInterval  time.Duration
 	GCERateLimit              RateLimitSpecs
 	GCERateLimitScale         float64
@@ -227,6 +229,10 @@ form namespace/name.`)
 	flag.StringVar(&F.DefaultSvcPortName, "default-backend-service-port", "http",
 		`Specify the default service's port used to serve a 404 page for the default backend. Takes
 only the port's name - not its number.`)
+	flag.StringVar(&F.DynamicConfigFilePath, "dynamic-config-path", "/etc/gce-ingress-config",
+		`Path to a directory containing the dynamic config files.`)
+	flag.DurationVar(&F.DynamicConfigPeriod, "dynamic-config-period", 1*time.Minute,
+		`Time period for reloading dynamic configuration.`)
 	flag.BoolVar(&F.DeprecatedEnableFrontendConfig, "enable-frontend-config", true,
 		`DEPCREATED: Optional, whether or not to enable FrontendConfig.`)
 	flag.Var(&F.GCERateLimit, "gce-ratelimit",

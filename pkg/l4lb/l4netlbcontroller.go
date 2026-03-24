@@ -17,8 +17,11 @@ limitations under the License.
 package l4lb
 
 import (
+	"bufio"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -35,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/ingress-gce/pkg/backends"
 	"k8s.io/ingress-gce/pkg/common/operator"
+	"k8s.io/ingress-gce/pkg/config"
 	"k8s.io/ingress-gce/pkg/context"
 	"k8s.io/ingress-gce/pkg/flags"
 	"k8s.io/ingress-gce/pkg/forwardingrules"
@@ -87,7 +91,8 @@ type L4NetLBController struct {
 	enableNEGSupport                   bool
 	enableNEGAsDefault                 bool
 
-	hasSynced func() bool
+	hasSynced     func() bool
+	DynamicConfig *config.DynamicConfig
 
 	logger klog.Logger
 }
@@ -97,6 +102,7 @@ func NewL4NetLBController(
 	ctx *context.ControllerContext,
 	stopCh <-chan struct{},
 	logger klog.Logger,
+	dynamicConfig *config.DynamicConfig,
 ) *L4NetLBController {
 	logger = logger.WithName("L4NetLBController")
 	if ctx.NumL4NetLBWorkers <= 0 {
@@ -122,6 +128,7 @@ func NewL4NetLBController(
 		serviceVersions:                    NewServiceVersionsTracker(),
 		logger:                             logger,
 		hasSynced:                          ctx.HasSynced,
+		DynamicConfig:                      dynamicConfig,
 	}
 	var networkLister cache.Indexer
 	if ctx.NetworkInformer != nil {
@@ -497,6 +504,62 @@ func (lc *L4NetLBController) SystemHealth() error {
 	return nil
 }
 
+// ListAndPrintFiles prints the name and the first line of content for each file
+// in the given directory. It skips subdirectories.
+func (lc *L4NetLBController) listAndPrintFiles(dirPath string) error {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %s: %w", dirPath, err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip directories
+		}
+
+		fileName := entry.Name()
+		filePath := filepath.Join(dirPath, fileName)
+
+		lc.logger.Info("ListingExperiments: File", "file", fileName)
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			lc.logger.Error(err, "ListingExperiments: error opening", "file", fileName)
+			continue
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		if scanner.Scan() {
+			lc.logger.Info("ListingExperiments: content", "content", scanner.Text())
+		} else if err := scanner.Err(); err != nil {
+			lc.logger.Error(err, "ListingExperiments: Error reading file", "file", fileName)
+		} else {
+			lc.logger.Info("ListingExperiments: content empty", "file", filePath)
+		}
+	}
+	return nil
+}
+
+// WatchDirectory periodically lists files in the given directory until stopChannel is closed.
+func (lc *L4NetLBController) watchDirectory(dirPath string, stopChannel <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		if err := lc.listAndPrintFiles(dirPath); err != nil {
+			lc.logger.Error(err, "ListingExperiments: Error listing files")
+		}
+
+		select {
+		case <-ticker.C:
+			// Continue to next iteration
+		case <-stopChannel:
+			return
+		}
+	}
+}
+
 // Run starts the loadbalancer controller.
 func (lc *L4NetLBController) Run() {
 	defer lc.shutdown()
@@ -509,6 +572,8 @@ func (lc *L4NetLBController) Run() {
 	lc.logger.Info("Running L4 Net Controller", "numWorkers", lc.ctx.NumL4NetLBWorkers)
 	activecontrollermetrics.RecordRunningController(activecontrollermetrics.L4NetLBControllerLabel)
 	defer activecontrollermetrics.RecordStoppedController(activecontrollermetrics.L4NetLBControllerLabel)
+
+	go lc.watchDirectory("/giraffe-data", lc.stopCh)
 
 	lc.svcQueue.Run()
 
@@ -537,6 +602,12 @@ func (lc *L4NetLBController) syncWrapper(key string) (err error) {
 }
 
 func (lc *L4NetLBController) sync(key string, svcLogger klog.Logger) error {
+	if lc.DynamicConfig != nil {
+		configView := lc.DynamicConfig.GetSnapshotView()
+		if configView.GetBool(config.TestFlag) {
+			svcLogger.Info("Dynamic config test flag is enabled!")
+		}
+	}
 	lc.syncTracker.Track()
 	metrics.PublishL4controllerLastSyncTime(L4NetLBControllerName)
 

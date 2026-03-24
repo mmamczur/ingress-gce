@@ -348,7 +348,7 @@ func createL4NetLBServiceController(vals gce.TestClusterValues, readOnlyMode boo
 	for _, n := range nodes {
 		ctx.NodeInformer.GetIndexer().Add(n)
 	}
-	lc := NewL4NetLBController(ctx, stopCh, klog.TODO())
+	lc := NewL4NetLBController(ctx, stopCh, klog.TODO(), nil)
 	lc.hasSynced = func() bool { return true }
 	return lc
 }

@@ -56,6 +56,7 @@ import (
 
 	"k8s.io/ingress-gce/cmd/glbc/app"
 	"k8s.io/ingress-gce/pkg/backendconfig"
+	"k8s.io/ingress-gce/pkg/config"
 	ingctx "k8s.io/ingress-gce/pkg/context"
 	"k8s.io/ingress-gce/pkg/controller"
 	"k8s.io/ingress-gce/pkg/crd"
@@ -90,6 +91,11 @@ func main() {
 	}
 
 	rootLogger.V(2).Info(fmt.Sprintf("Flags = %+v", flags.F))
+
+	dynamicConfig := config.NewDynamicConfig(flags.F.DynamicConfigFilePath, flags.F.DynamicConfigPeriod)
+	config.RegisterFlags(dynamicConfig)
+	dynamicConfig.Start()
+
 	defer klog.Flush()
 	// Create kube-config that uses protobufs to communicate with API server.
 	kubeConfigForProtobuf, err := app.NewKubeConfigForProtobuf(rootLogger)
@@ -382,7 +388,7 @@ func main() {
 			"InstanceGroup controller", flags.F.EnableIGController,
 			"PSC controller", flags.F.EnablePSC,
 		)
-		runL4Controllers(ctx, systemHealth, rOption, leOption, logger)
+		runL4Controllers(ctx, systemHealth, rOption, leOption, logger, dynamicConfig)
 	}
 
 	if flags.F.LeaderElection.LeaderElect {
@@ -432,7 +438,7 @@ func main() {
 				"InstanceGroup controller", flags.F.EnableIGController,
 				"PSC controller", flags.F.EnablePSC,
 			)
-			l4Runner, err := makeL4RunnerWithLeaderElection(ctx, systemHealth, rOption, leOption, logger)
+			l4Runner, err := makeL4RunnerWithLeaderElection(ctx, systemHealth, rOption, leOption, logger, dynamicConfig)
 			if err != nil {
 				klog.Fatalf("makeLeaderElectionConfig()=%v, want nil", err)
 			}
@@ -530,6 +536,7 @@ func makeL4RunnerWithLeaderElection(
 	runOption runOption,
 	leOption leaderElectionOption,
 	logger klog.Logger,
+	dynamicConfig *config.DynamicConfig,
 ) (*leaderelection.LeaderElectionConfig, error) {
 	lockLogger := logger.WithValues("lock", l4LockName)
 	return makeRunnerWithLeaderElection(
@@ -537,7 +544,7 @@ func makeL4RunnerWithLeaderElection(
 		l4LockName,
 		func(context.Context) {
 			lockLogger.V(0).Info("Acquired L4 Leader election lock")
-			runL4Controllers(ctx, systemHealth, runOption, leOption, logger)
+			runL4Controllers(ctx, systemHealth, runOption, leOption, logger, dynamicConfig)
 		},
 		func() {
 			// When leadership is lost for L4 gate, initiate a graceful shutdown
@@ -602,7 +609,7 @@ func runIngressControllers(ctx *ingctx.ControllerContext, systemHealth *systemhe
 	ctx.Start(option.stopCh)
 }
 
-func runL4Controllers(ctx *ingctx.ControllerContext, systemHealth *systemhealth.SystemHealth, option runOption, leOption leaderElectionOption, logger klog.Logger) {
+func runL4Controllers(ctx *ingctx.ControllerContext, systemHealth *systemhealth.SystemHealth, option runOption, leOption leaderElectionOption, logger klog.Logger, dynamicConfig *config.DynamicConfig) {
 	if !flags.F.RunL4Controller && !flags.F.EnablePSC && !flags.F.EnableIGController && !flags.F.RunL4NetLBController {
 		return
 	}
@@ -640,7 +647,7 @@ func runL4Controllers(ctx *ingctx.ControllerContext, systemHealth *systemhealth.
 
 	// The L4NetLbController will be run when RbsMode flag is Set
 	if flags.F.RunL4NetLBController {
-		l4netlbController := l4lb.NewL4NetLBController(ctx, option.stopCh, logger)
+		l4netlbController := l4lb.NewL4NetLBController(ctx, option.stopCh, logger, dynamicConfig)
 		systemHealth.AddHealthCheck(l4lb.L4NetLBControllerName, l4netlbController.SystemHealth)
 
 		runWithWg(l4netlbController.Run, option.wg)
