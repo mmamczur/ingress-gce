@@ -19,9 +19,13 @@ package controllers
 import (
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
+	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/ingress-gce/pkg/composite"
 	"k8s.io/ingress-gce/pkg/context"
+	"k8s.io/ingress-gce/pkg/l4/forwardingrules"
 	"k8s.io/ingress-gce/pkg/l4/annotations"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/klog/v2"
@@ -88,6 +92,11 @@ func (lc *CustomLBController) sync(key string) error {
 	}
 	svcLogger := lc.logger.WithValues("service", klog.KObj(svc))
 
+	frName := svc.Annotations[annotations.CustomForwardingRuleKey]
+	if frName != "" {
+		return lc.syncCustomForwardingRule(svc, frName, svcLogger)
+	}
+
 	if svc.Spec.LoadBalancerIP == "" {
 		svcLogger.V(4).Info("Service has no loadBalancerIP, skipping")
 		return nil
@@ -97,6 +106,64 @@ func (lc *CustomLBController) sync(key string) error {
 		Ingress: []v1.LoadBalancerIngress{
 			{IP: svc.Spec.LoadBalancerIP},
 		},
+	}
+
+	// Ensure any old custom annotations are removed
+	if err := updateL4ResourcesAnnotations(lc.ctx, svc, nil, svcLogger); err != nil {
+		return fmt.Errorf("failed to remove old custom annotations: %w", err)
+	}
+
+	return updateServiceStatus(lc.ctx, svc, newStatus, nil, svcLogger)
+}
+
+func (lc *CustomLBController) syncCustomForwardingRule(svc *v1.Service, frName string, svcLogger klog.Logger) error {
+	frc := forwardingrules.New(lc.ctx.Cloud, meta.VersionGA, meta.Regional, lc.logger)
+	fr, err := frc.Get(frName)
+	if err != nil {
+		return fmt.Errorf("failed to get forwarding rule %s: %w", frName, err)
+	}
+
+	newStatus := &v1.LoadBalancerStatus{
+		Ingress: []v1.LoadBalancerIngress{
+			{IP: fr.IPAddress},
+		},
+	}
+
+	if fr.BackendService == "" {
+		return fmt.Errorf("forwarding rule %s has no backend service", frName)
+	}
+	bsID, err := cloud.ParseResourceURL(fr.BackendService)
+	if err != nil {
+		return fmt.Errorf("failed to parse backend service URL %s: %w", fr.BackendService, err)
+	}
+	bs, err := composite.GetBackendService(lc.ctx.Cloud, bsID.Key, meta.VersionGA, lc.logger)
+	if err != nil {
+		return fmt.Errorf("failed to get backend service %s: %w", bsID.Key.Name, err)
+	}
+
+	if len(bs.HealthChecks) == 0 {
+		return fmt.Errorf("backend service %s has no health checks", bs.Name)
+	}
+	hcID, err := cloud.ParseResourceURL(bs.HealthChecks[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse health check URL %s: %w", bs.HealthChecks[0], err)
+	}
+	hc, err := composite.GetHealthCheck(lc.ctx.Cloud, hcID.Key, meta.VersionGA, lc.logger)
+	if err != nil {
+		return fmt.Errorf("failed to get health check %s: %w", hcID.Key.Name, err)
+	}
+
+	var newAnnotations map[string]string
+	if hc.Type == "HTTP" && hc.HttpHealthCheck != nil {
+		newAnnotations = map[string]string{
+			annotations.ExternalHealthCheckPortKey: fmt.Sprintf("%d", hc.HttpHealthCheck.Port),
+		}
+	} else {
+		lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "UnsupportedHealthCheck", "health check configuration is unsupported")
+	}
+
+	if err := updateL4ResourcesAnnotations(lc.ctx, svc, newAnnotations, svcLogger); err != nil {
+		return fmt.Errorf("failed to update service annotations: %w", err)
 	}
 
 	return updateServiceStatus(lc.ctx, svc, newStatus, nil, svcLogger)

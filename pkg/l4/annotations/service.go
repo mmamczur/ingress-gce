@@ -107,6 +107,11 @@ const (
 
 	// Service annotation key for specifying L4LBConfig
 	L4LBConfigKey = "networking.gke.io/l4lb-config"
+
+	// CustomForwardingRuleKey is the annotation key for custom forwarding rule name.
+	CustomForwardingRuleKey = "networking.gke.io/custom-forwarding-rule"
+	// ExternalHealthCheckPortKey is the annotation key for the port of the external health check.
+	ExternalHealthCheckPortKey = "networking.gke.io/external-hc-port"
 )
 
 // Service represents Service annotations.
