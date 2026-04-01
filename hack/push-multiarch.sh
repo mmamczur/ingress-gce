@@ -19,7 +19,7 @@ set -o pipefail
 set -o xtrace
 
 # docker buildx is in /root/.docker/cli-plugins/docker-buildx
-HOME=/root
+HOME=/usr/local/google/home/mmamczur
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd ${REPO_ROOT}
@@ -45,26 +45,49 @@ docker buildx install
 docker buildx create --use
 
 # Download crane cli
-curl -sL "https://github.com/google/go-containerregistry/releases/download/v0.15.2/go-containerregistry_$(uname -s)_$(uname -m).tar.gz" | tar xvzf - krane
+curl -sL "https://github.com/google/go-containerregistry/releases/download/v0.21.3/go-containerregistry_$(uname -s)_$(uname -m).tar.gz" | tar xvzf - krane
 
 for binary in ${BINARIES}
 do
     # "arm64 amd64" ---> "linux/arm64,linux/amd64"
-    PLATFORMS="linux/$(echo ${ALL_ARCH} | sed 's~ ~,linux/~g')"
-    echo "docker buildx platform parameters: ${PLATFORMS}"
     MULTIARCH_IMAGE="${REGISTRY}/ingress-gce-${binary}:${VERSION}"
     echo "building ${MULTIARCH_IMAGE} image.."
 
-    tags="--tag ${MULTIARCH_IMAGE}"
-    for tag in ${ADDITIONAL_TAGS}
+    # build the per arch images
+    for arch in ${ALL_ARCH}
     do
-        tags+=" --tag ${REGISTRY}/ingress-gce-${binary}:${tag}"
+      tag="${MULTIARCH_IMAGE}-${arch}"
+      docker buildx build -f Dockerfile.${binary} . --tag ${tag} --platform "linux/${arch}" --load
+      docker push ${tag}
     done
 
-    docker buildx build --push  \
-        --platform ${PLATFORMS}  \
-        ${tags} \
-        -f Dockerfile.${binary} .
+    # delete the manifest locally, so it won't conflict with a previous cache.
+    docker manifest rm ${MULTIARCH_IMAGE} || true
+    arch_images=""
+    for arch in ${ALL_ARCH}
+    do
+      arch_images+="${MULTIARCH_IMAGE}-${arch} "
+    done
+    # create the multiarch manifest and annotate with specific os/arch combination
+    docker manifest create --amend ${MULTIARCH_IMAGE} ${arch_images}
+    for arch in ${ALL_ARCH}
+    do
+      docker manifest annotate --os=linux --arch=${arch} ${MULTIARCH_IMAGE} ${MULTIARCH_IMAGE}-${arch}
+    done
+
+    docker manifest push ${MULTIARCH_IMAGE}
+
+    # attach the extra tags to all images
+    for tag in ${ADDITIONAL_TAGS}
+    do
+        ./krane tag ${MULTIARCH_IMAGE} ${tag}
+        for arch in ${ALL_ARCH}
+        do
+          ./krane tag ${MULTIARCH_IMAGE}-${arch} ${tag}-${arch}
+        done
+    done
+
+
     echo "done, pushed $MULTIARCH_IMAGE image"
 
    # Tag arch specific images for the legacy registries
@@ -74,7 +97,7 @@ do
        ./krane copy --platform linux/${arch} ${MULTIARCH_IMAGE} ${REGISTRY}/ingress-gce-${binary}-${arch}:${VERSION}
        for tag in ${ADDITIONAL_TAGS}
        do
-           ./krane copy --platform linux/${arch} ${MULTIARCH_IMAGE} ${REGISTRY}/ingress-gce-${binary}-${arch}:${tag}
+           ./krane tag ${REGISTRY}/ingress-gce-${binary}-${arch}:${VERSION} ${tag}
        done
    done
   echo "images are copied to arch specific registries"
