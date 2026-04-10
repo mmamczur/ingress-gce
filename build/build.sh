@@ -42,8 +42,11 @@ export GOOS="${OS}"
 if [ $GOARCH == "amd64" ]; then
     export GOBIN="$GOPATH/bin/linux_amd64"
 fi
-
-BIN_PKG="$PKG/cmd/$(basename ${TARGET})"
+BIN_NAME="$(basename ${TARGET})"
+if [ "$BIN_NAME" = "gl4lbc" ]; then
+  BIN_NAME="glbc"
+fi
+BIN_PKG="$PKG/cmd/$BIN_NAME"
 LD_FLAGS="-X ${PKG}/pkg/version.Version=${VERSION} -X ${PKG}/pkg/version.GitCommit=${GIT_COMMIT}"
 
 if echo "${TARGET}" | grep '.*-test$'; then
