@@ -8,10 +8,14 @@ import (
 	"testing"
 	"time"
 
+	networkv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/network/v1"
+	nodetopologyv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/nodetopology/v1"
 	networkfake "github.com/GoogleCloudPlatform/gke-networking-api/client/network/clientset/versioned/fake"
 	nodetopologyfake "github.com/GoogleCloudPlatform/gke-networking-api/client/nodetopology/clientset/versioned/fake"
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -23,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	cloudgce "k8s.io/cloud-provider-gcp/providers/gce"
 	providerconfigv1 "k8s.io/ingress-gce/pkg/apis/providerconfig/v1"
+	svcnegv1 "k8s.io/ingress-gce/pkg/apis/svcneg/v1beta1"
 	"k8s.io/ingress-gce/pkg/flags"
 	"k8s.io/ingress-gce/pkg/multiproject/common/finalizer"
 	multiprojectgce "k8s.io/ingress-gce/pkg/multiproject/common/gce"
@@ -31,8 +36,8 @@ import (
 	negtypes "k8s.io/ingress-gce/pkg/neg/types"
 	"k8s.io/ingress-gce/pkg/negannotation"
 	pcclientfake "k8s.io/ingress-gce/pkg/providerconfig/client/clientset/versioned/fake"
-
 	svcnegfake "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned/fake"
+	"k8s.io/ingress-gce/pkg/test"
 	"k8s.io/ingress-gce/pkg/utils/namer"
 	klog "k8s.io/klog/v2"
 )
@@ -208,10 +213,25 @@ func TestStartProviderConfigIntegration(t *testing.T) {
 
 			// Build fake clients.
 			kubeClient := fake.NewSimpleClientset()
+
+			test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "services", &corev1.Service{ObjectMeta: test.DefaultBookmarkObjectMeta})
+			test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "ingresses", &networkingv1.Ingress{ObjectMeta: test.DefaultBookmarkObjectMeta})
+			test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "pods", &corev1.Pod{ObjectMeta: test.DefaultBookmarkObjectMeta})
+			test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "endpointslices", &discoveryv1.EndpointSlice{ObjectMeta: test.DefaultBookmarkObjectMeta})
+			test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "nodes", &corev1.Node{ObjectMeta: test.DefaultBookmarkObjectMeta})
 			pcClient := pcclientfake.NewSimpleClientset()
+			test.PrependBookmarkReactor(&pcClient.Fake, pcClient.Tracker(), "providerconfigs", &providerconfigv1.ProviderConfig{
+				ObjectMeta: test.DefaultBookmarkObjectMeta,
+			})
 			svcNegClient := svcnegfake.NewSimpleClientset()
+			test.PrependBookmarkReactor(&svcNegClient.Fake, svcNegClient.Tracker(), "servicenetworkendpointgroups", &svcnegv1.ServiceNetworkEndpointGroup{
+				ObjectMeta: test.DefaultBookmarkObjectMeta,
+			})
 			networkClient := networkfake.NewSimpleClientset()
+			test.PrependBookmarkReactor(&networkClient.Fake, networkClient.Tracker(), "networks", &networkv1.Network{ObjectMeta: test.DefaultBookmarkObjectMeta})
+			test.PrependBookmarkReactor(&networkClient.Fake, networkClient.Tracker(), "gkenetworkparamsets", &networkv1.GKENetworkParamSet{ObjectMeta: test.DefaultBookmarkObjectMeta})
 			nodeTopologyClient := nodetopologyfake.NewSimpleClientset()
+			test.PrependBookmarkReactor(&nodeTopologyClient.Fake, nodeTopologyClient.Tracker(), "nodetopologies", &nodetopologyv1.NodeTopology{ObjectMeta: test.DefaultBookmarkObjectMeta})
 
 			// This simulates the automatic labeling that the real environment does.
 			// ProviderConfig name label is set to the namespace of the object.
@@ -248,7 +268,7 @@ func TestStartProviderConfigIntegration(t *testing.T) {
 					syncMetrics.FakeSyncerMetrics(),
 				)
 			}()
-
+			time.Sleep(time.Second * 10)
 			// Create the test's ProviderConfigs.
 			for _, pc := range tc.providerConfigs {
 				addressPrefix := "10.100"
@@ -324,10 +344,25 @@ func TestSharedInformers_PC1Stops_PC2AndPC3KeepWorking(t *testing.T) {
 
 	// Fake clients / factories
 	kubeClient := fake.NewSimpleClientset()
+	test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "services", &corev1.Service{ObjectMeta: test.DefaultBookmarkObjectMeta})
+	test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "ingresses", &networkingv1.Ingress{ObjectMeta: test.DefaultBookmarkObjectMeta})
+	test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "pods", &corev1.Pod{ObjectMeta: test.DefaultBookmarkObjectMeta})
+	test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "endpointslices", &discoveryv1.EndpointSlice{ObjectMeta: test.DefaultBookmarkObjectMeta})
+	test.PrependBookmarkReactor(&kubeClient.Fake, kubeClient.Tracker(), "nodes", &corev1.Node{ObjectMeta: test.DefaultBookmarkObjectMeta})
+
 	pcClient := pcclientfake.NewSimpleClientset()
+	test.PrependBookmarkReactor(&pcClient.Fake, pcClient.Tracker(), "providerconfigs", &providerconfigv1.ProviderConfig{
+		ObjectMeta: test.DefaultBookmarkObjectMeta,
+	})
 	svcNegClient := svcnegfake.NewSimpleClientset()
+	test.PrependBookmarkReactor(&svcNegClient.Fake, svcNegClient.Tracker(), "servicenetworkendpointgroups", &svcnegv1.ServiceNetworkEndpointGroup{
+		ObjectMeta: test.DefaultBookmarkObjectMeta,
+	})
 	networkClient := networkfake.NewSimpleClientset()
+	test.PrependBookmarkReactor(&networkClient.Fake, networkClient.Tracker(), "networks", &networkv1.Network{ObjectMeta: test.DefaultBookmarkObjectMeta})
+	test.PrependBookmarkReactor(&networkClient.Fake, networkClient.Tracker(), "gkenetworkparamsets", &networkv1.GKENetworkParamSet{ObjectMeta: test.DefaultBookmarkObjectMeta})
 	nodeTopoClient := nodetopologyfake.NewSimpleClientset()
+	test.PrependBookmarkReactor(&nodeTopoClient.Fake, nodeTopoClient.Tracker(), "nodetopologies", &nodetopologyv1.NodeTopology{ObjectMeta: test.DefaultBookmarkObjectMeta})
 
 	// Simulate webhook: label SvcNEGs with provider-config name == namespace.
 	testutil.EmulateProviderConfigLabelingWebhook(&svcNegClient.Fake, "servicenetworkendpointgroups")
@@ -350,7 +385,8 @@ func TestSharedInformers_PC1Stops_PC2AndPC3KeepWorking(t *testing.T) {
 		kubeSystemUID, kubeClient, pcClient,
 		gceCreator, rootNamer, globalStop, syncMetrics.FakeSyncerMetrics(),
 	)
-
+	// Without waiting for the ProviderConfig above to settle it would not pick up added resources
+	time.Sleep(time.Second * 10)
 	// --- pc-1: create and validate baseline service ---
 	pc1 := createPC(ctx, t, pcClient, "pc-1", "owner-1", "proj-1", 1111, "net-1", "subnet-1")
 	seedAll(t, kubeClient, informersFactory, "pc-1", "svc1", "10.100")
