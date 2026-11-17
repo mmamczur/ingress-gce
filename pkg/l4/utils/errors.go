@@ -285,3 +285,26 @@ func IsBackendNotAttachedError(err error) bool {
 	var backendNotAttachedErr *BackendNotAttachedError
 	return errors.As(err, &backendNotAttachedErr)
 }
+
+// VIPCollisionError is an error returned when a VIP can't be used by a service
+// because its ports collide with the ports of other services using the VIP.
+type VIPCollisionError struct {
+	vip        string
+	collisions string
+}
+
+func (e *VIPCollisionError) Error() string {
+	return fmt.Sprintf("VIP %s collides with %s", e.vip, e.collisions)
+}
+
+// NewVIPCollisionError creates a new VIPCollisionError. collisions describes
+// the colliding services and ports.
+func NewVIPCollisionError(vip, collisions string) *VIPCollisionError {
+	return &VIPCollisionError{vip: vip, collisions: collisions}
+}
+
+// IsVIPCollisionError checks if wrapped error is a VIPCollisionError.
+func IsVIPCollisionError(err error) bool {
+	var vipCollisionErr *VIPCollisionError
+	return errors.As(err, &vipCollisionErr)
+}

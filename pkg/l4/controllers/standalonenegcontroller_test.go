@@ -24,11 +24,13 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
+	"github.com/google/go-cmp/cmp"
 	computebeta "google.golang.org/api/compute/v0.beta"
 	"google.golang.org/api/googleapi"
 	v1 "k8s.io/api/core/v1"
@@ -45,8 +47,10 @@ import (
 	"k8s.io/ingress-gce/pkg/l4/annotations"
 	l4metrics "k8s.io/ingress-gce/pkg/l4/metrics"
 	l4utils "k8s.io/ingress-gce/pkg/l4/utils"
+	"k8s.io/ingress-gce/pkg/l4/vipsharing"
 	svcnegclientfake "k8s.io/ingress-gce/pkg/svcneg/client/clientset/versioned/fake"
 	"k8s.io/ingress-gce/pkg/test"
+	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/ingress-gce/pkg/utils/namer"
 	"k8s.io/klog/v2"
 )
@@ -82,8 +86,12 @@ func TestStandaloneNEGLBSync(t *testing.T) {
 		expectEventReasons  []string
 		// absentEventReasons are checked after all expectEventReasons are found.
 		absentEventReasons []string
-		expectError        bool
-		expectCondition    *metav1.Condition
+		// expectEventMessages are substrings that must be found in the event messages.
+		expectEventMessages []string
+		expectError         bool
+		expectCondition     *metav1.Condition
+		// otherSvcs are other services present in the informer cache.
+		otherSvcs []*v1.Service
 	}{
 		{
 			desc: "Multiple forwarding rules, one missing, success",
@@ -1783,6 +1791,184 @@ func TestStandaloneNEGLBSync(t *testing.T) {
 			expectCondition:     ipProgrammedCondition("10.0.0.100"),
 			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.100:12345"},
 		},
+		{
+			desc:                "VIP shared with a service using different ports",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(443)), withStatusIPs("10.0.0.100"), withExternalHCAnnotation("10.0.0.100:23456"))},
+			expectIPs:           []string{"10.0.0.100"},
+			expectEventReasons:  []string{"SyncLoadBalancerSuccessful"},
+			absentEventReasons:  []string{"VIPCollision"},
+			expectCondition:     ipProgrammedCondition("10.0.0.100"),
+			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.100:12345"},
+		},
+		{
+			desc:                "VIP shared with a service using the same port with a different protocol",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(53))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(udpPort(53)), withStatusIPs("10.0.0.100"))},
+			expectIPs:           []string{"10.0.0.100"},
+			expectCondition:     ipProgrammedCondition("10.0.0.100"),
+			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.100:12345"},
+		},
+		{
+			desc:                "VIP colliding on a service port is not added to the status",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100"))},
+			expectError:         true,
+			expectEventReasons:  []string{"VIPCollision"},
+			expectEventMessages: []string{"VIP 10.0.0.100 of forwarding rule(s) fr1 collides with service default/other on TCP:80. The VIP is not added to the service status"},
+			absentAnnotations:   []string{annotations.ExternalHealthCheckKey},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:                "VIP collisions are detected with non canonical IPv6 VIPs",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "2600:1900:4000:0001:0000:0000:0000:000A/96", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(80)), withStatusIPs("2600:1900:4000:1::a"))},
+			expectError:         true,
+			expectEventMessages: []string{"VIP 2600:1900:4000:1::a of forwarding rule(s) fr1 collides with service default/other on TCP:80"},
+			absentAnnotations:   []string{annotations.ExternalHealthCheckKey},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:                "VIP colliding on the redirected health check port is not added to the status",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80)), withHealthCheckNodePort(30000)),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(12345)), withStatusIPs("10.0.0.100"))},
+			expectError:         true,
+			expectEventMessages: []string{"collides with service default/other on TCP:12345 (health check vs service port)"},
+			absentAnnotations:   []string{annotations.ExternalHealthCheckKey},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:                "VIP colliding with the redirected health check port of another service is not added to the status",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr2", withName("other"), withServicePorts(tcpPort(443)), withStatusIPs("10.0.0.100"), withExternalHCAnnotation("10.0.0.100:12345"))},
+			expectError:         true,
+			expectEventMessages: []string{"collides with service default/other on TCP:12345 (health check vs health check)"},
+			absentAnnotations:   []string{annotations.ExternalHealthCheckKey},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:                "VIP colliding with the health check node port of a non Standalone NEG service is not added to the status",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(30000))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("", withName("netlb"), withLBClass(nil), withServicePorts(tcpPort(443)), withHealthCheckNodePort(30000), withStatusIPs("10.0.0.100"))},
+			expectError:         true,
+			expectEventMessages: []string{"collides with service default/netlb on TCP:30000 (service port vs health check)"},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:        "VIP colliding with multiple services lists all of them",
+			svc:         standaloneSvc("fr1", withServicePorts(tcpPort(80), tcpPort(443))),
+			frs:         frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:         bssByName(regionalBS("bs", "hc")),
+			hcs:         hcsByName(httpHC("hc", 12345)),
+			svcNegs:     standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:   []*v1.Service{standaloneSvc("fr1", withName("other1"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100")), standaloneSvc("fr1", withName("other2"), withServicePorts(tcpPort(443)), withStatusIPs("10.0.0.100"))},
+			expectError: true,
+			expectEventMessages: []string{
+				"collides with service default/other1 on TCP:80; service default/other2 on TCP:443",
+			},
+			expectCondition: &metav1.Condition{
+				Type:    "ExternalIPProgrammed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "VIPCollision",
+				Message: "The load balancer VIP collides with ports of another service",
+			},
+		},
+		{
+			desc:                "Only the colliding VIP is not added to the status and the external health check annotation",
+			svc:                 standaloneSvc("fr1,fr2", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs"), regionalFR("fr2", "10.0.0.101", "bs")),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100"))},
+			expectIPs:           []string{"10.0.0.101"},
+			expectError:         true,
+			expectEventReasons:  []string{"VIPCollision"},
+			absentEventReasons:  []string{"ForwardingRuleUnusable"},
+			expectEventMessages: []string{"VIP 10.0.0.100 of forwarding rule(s) fr1 collides with service default/other on TCP:80"},
+			expectCondition:     ipProgrammedCondition("10.0.0.101"),
+			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.101:12345"},
+		},
+		{
+			desc:                "VIP already in the status of the service is kept when colliding",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100"), withExternalHCAnnotation("10.0.0.100:12345")),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100"))},
+			expectIPs:           []string{"10.0.0.100"},
+			expectEventReasons:  []string{"VIPCollision", "SyncLoadBalancerSuccessful"},
+			expectEventMessages: []string{"VIP 10.0.0.100 of forwarding rule(s) fr1 collides with service default/other on TCP:80. The VIP was already programmed for the service, it is kept in the service status"},
+			expectCondition:     ipProgrammedCondition("10.0.0.100"),
+			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.100:12345"},
+		},
+		{
+			desc:                "Services not holding the VIP in status are ignored",
+			svc:                 standaloneSvc("fr1", withServicePorts(tcpPort(80))),
+			frs:                 frsByName(regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())),
+			bss:                 bssByName(regionalBS("bs", "hc")),
+			hcs:                 hcsByName(httpHC("hc", 12345)),
+			svcNegs:             standaloneSvcNegs(l4Namer.L4Backend("default", "svc")),
+			otherSvcs:           []*v1.Service{standaloneSvc("fr1", withName("other"), withServicePorts(tcpPort(80))), standaloneSvc("fr3", withName("other-vip"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.200"))},
+			expectIPs:           []string{"10.0.0.100"},
+			absentEventReasons:  []string{"VIPCollision"},
+			expectCondition:     ipProgrammedCondition("10.0.0.100"),
+			expectedAnnotations: map[string]string{annotations.ExternalHealthCheckKey: "10.0.0.100:12345"},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1915,6 +2101,11 @@ func TestStandaloneNEGLBSync(t *testing.T) {
 
 			lc := NewStandaloneNEGLBController(c, stopCh, klog.TODO())
 
+			for _, other := range tc.otherSvcs {
+				c.ServiceInformer.GetIndexer().Add(other)
+				kubeClient.CoreV1().Services(other.Namespace).Create(context.TODO(), other, metav1.CreateOptions{})
+			}
+
 			// Add service to informer
 			c.ServiceInformer.GetIndexer().Add(tc.svc)
 			// Also add to fake kube client so updateStatus works
@@ -1997,6 +2188,27 @@ func TestStandaloneNEGLBSync(t *testing.T) {
 					if slices.Contains(tc.absentEventReasons, e.Reason) {
 						t.Errorf("Unexpected %s event: %s", e.Reason, e.Message)
 					}
+				}
+			}
+			for _, expectedMessage := range tc.expectEventMessages {
+				var messages []string
+				err := wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 5*time.Second, true,
+					func(ctx context.Context) (bool, error) {
+						events, err := kubeClient.CoreV1().Events(tc.svc.Namespace).List(ctx, metav1.ListOptions{})
+						if err != nil {
+							return false, err
+						}
+						messages = nil
+						for _, e := range events.Items {
+							messages = append(messages, e.Message)
+							if strings.Contains(e.Message, expectedMessage) {
+								return true, nil
+							}
+						}
+						return false, nil
+					})
+				if err != nil {
+					t.Errorf("Expected an event message containing %q, got messages: %q", expectedMessage, messages)
 				}
 			}
 
@@ -2694,6 +2906,185 @@ func TestStandaloneNEGLBControllerEventHandlers_Delete(t *testing.T) {
 	}
 }
 
+// setupSharedVIPServices creates a L3_DEFAULT forwarding rule fr1 on VIP
+// 10.0.0.100 with an HTTP health check on port 12345, and adds the services
+// referencing it to the informer cache and the kube client. The informer is
+// not running, so the informer cache is not updated by status updates.
+func setupSharedVIPServices(t *testing.T, kubeClient *fake.Clientset, fakeGCE *gce.Cloud, lc *StandaloneNEGLBController, svcs ...*v1.Service) {
+	t.Helper()
+	fr := regionalFR("fr1", "10.0.0.100", "bs", withFRProtocol("L3_DEFAULT"), withAllPorts())
+	frKey, _ := composite.CreateKey(fakeGCE, fr.Name, fr.Scope)
+	if err := composite.CreateForwardingRule(fakeGCE, frKey, fr, klog.TODO()); err != nil {
+		t.Fatalf("Failed to create forwarding rule: %v", err)
+	}
+	hc := httpHC("hc", 12345)
+	hcKey, _ := composite.CreateKey(fakeGCE, hc.Name, hc.Scope)
+	if err := composite.CreateHealthCheck(fakeGCE, hcKey, hc, klog.TODO()); err != nil {
+		t.Fatalf("Failed to create health check: %v", err)
+	}
+	bs := regionalBS("bs", "hc")
+	bsKey, _ := composite.CreateKey(fakeGCE, bs.Name, bs.Scope)
+	if err := composite.CreateBackendService(fakeGCE, bsKey, bs, klog.TODO()); err != nil {
+		t.Fatalf("Failed to create backend service: %v", err)
+	}
+	for _, svc := range svcs {
+		for _, svcNeg := range standaloneSvcNegs(lc.namer.L4Backend(svc.Namespace, svc.Name)) {
+			svcNeg.SetOwnerReferences([]metav1.OwnerReference{*metav1.NewControllerRef(svc, svc.GroupVersionKind())})
+			lc.ctx.SvcNegInformer.GetIndexer().Add(svcNeg)
+		}
+		lc.ctx.ServiceInformer.GetIndexer().Add(svc)
+		if _, err := kubeClient.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("Failed to create service %s: %v", svc.Name, err)
+		}
+	}
+}
+
+// TestStandaloneNEGLBVIPCollisionConcurrentSyncs verifies that only one of the
+// colliding services synced concurrently, as with multiple workers, gets the VIP.
+func TestStandaloneNEGLBVIPCollisionConcurrentSyncs(t *testing.T) {
+	const numServices = 10
+	kubeClient, fakeGCE, lc, stopCh := setupControllerContext(t)
+	defer close(stopCh)
+
+	var svcs []*v1.Service
+	for i := 0; i < numServices; i++ {
+		svcs = append(svcs, standaloneSvc("fr1", withName(fmt.Sprintf("svc-%d", i)), withServicePorts(tcpPort(80))))
+	}
+	setupSharedVIPServices(t, kubeClient, fakeGCE, lc, svcs...)
+
+	var wg sync.WaitGroup
+	errs := make([]error, numServices)
+	for i, svc := range svcs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = lc.syncWrapper(svc.Namespace + "/" + svc.Name)
+		}()
+	}
+	wg.Wait()
+
+	var programmed []string
+	for i, svc := range svcs {
+		updated, err := kubeClient.CoreV1().Services(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get service %s: %v", svc.Name, err)
+		}
+		if len(updated.Status.LoadBalancer.Ingress) > 0 {
+			programmed = append(programmed, svc.Name)
+			if errs[i] != nil {
+				t.Errorf("Sync of service %s which got the VIP failed: %v", svc.Name, errs[i])
+			}
+		} else if !l4utils.IsVIPCollisionError(errs[i]) {
+			t.Errorf("Sync of service %s returned error %v, want a VIP collision error", svc.Name, errs[i])
+		}
+	}
+	if len(programmed) != 1 {
+		t.Errorf("Got %d services with the VIP programmed, want 1: %v", len(programmed), programmed)
+	}
+	if got := len(lc.vipReservations.BlockedServices("10.0.0.100")); got != numServices-1 {
+		t.Errorf("Got %d services blocked on the VIP, want %d", got, numServices-1)
+	}
+}
+
+// TestStandaloneNEGLBVIPCollisionStaleCache verifies that a VIP written to the
+// status of a service is taken into account for the services synced before the
+// status update is reflected in the informer cache.
+func TestStandaloneNEGLBVIPCollisionStaleCache(t *testing.T) {
+	kubeClient, fakeGCE, lc, stopCh := setupControllerContext(t)
+	defer close(stopCh)
+
+	svcA := standaloneSvc("fr1", withName("a"), withServicePorts(tcpPort(80)))
+	svcB := standaloneSvc("fr1", withName("b"), withServicePorts(tcpPort(80)))
+	setupSharedVIPServices(t, kubeClient, fakeGCE, lc, svcA, svcB)
+
+	if err := lc.syncWrapper("default/a"); err != nil {
+		t.Fatalf("sync of service a failed: %v", err)
+	}
+	err := lc.syncWrapper("default/b")
+	if !l4utils.IsVIPCollisionError(err) {
+		t.Errorf("sync of service b returned error %v, want a VIP collision error", err)
+	}
+
+	for name, wantIPs := range map[string]int{"a": 1, "b": 0} {
+		svc, err := kubeClient.CoreV1().Services("default").Get(context.TODO(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get service %s: %v", name, err)
+		}
+		if got := len(svc.Status.LoadBalancer.Ingress); got != wantIPs {
+			t.Errorf("Service %s has %d ingress IPs, want %d", name, got, wantIPs)
+		}
+	}
+	if diff := cmp.Diff([]types.NamespacedName{{Namespace: "default", Name: "b"}}, lc.vipReservations.BlockedServices("10.0.0.100")); diff != "" {
+		t.Errorf("Blocked services mismatch (-want +got):\n%s", diff)
+	}
+
+	// Removing service a releases the VIP.
+	lc.ctx.ServiceInformer.GetIndexer().Delete(svcA)
+	if err := lc.syncWrapper("default/a"); err != nil {
+		t.Fatalf("sync of deleted service a failed: %v", err)
+	}
+	if err := lc.syncWrapper("default/b"); err != nil {
+		t.Errorf("sync of service b after the deletion of service a failed: %v", err)
+	}
+	if got := len(lc.vipReservations.BlockedServices("10.0.0.100")); got != 0 {
+		t.Errorf("Got %d services blocked on the VIP after it was released, want 0", got)
+	}
+}
+
+func TestStandaloneNEGLBEnqueueServicesAffectedByVIPChange(t *testing.T) {
+	_, _, lc, stopCh := setupControllerContext(t)
+	defer close(stopCh)
+	indexer := lc.ctx.ServiceInformer.GetIndexer()
+
+	holder := standaloneSvc("fr1", withName("holder"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.100"))
+	otherHolder := standaloneSvc("fr1", withName("other-holder"), withServicePorts(tcpPort(81)), withStatusIPs("10.0.0.100"))
+	netLBHolder := standaloneSvc("", withName("netlb"), withLBClass(nil), withServicePorts(tcpPort(82)), withStatusIPs("10.0.0.100"))
+	unrelated := standaloneSvc("fr2", withName("unrelated"), withServicePorts(tcpPort(80)), withStatusIPs("10.0.0.200"))
+	for _, svc := range []*v1.Service{holder, otherHolder, netLBHolder, unrelated} {
+		indexer.Add(svc)
+	}
+	blocked := standaloneSvc("fr1", withName("blocked"), withServicePorts(tcpPort(80)))
+	result := lc.vipReservations.Reserve(blocked, map[string][]vipsharing.PortUse{"10.0.0.100": vipsharing.PortsUsedOnAllVIPs(blocked)})["10.0.0.100"]
+	if !result.Blocked {
+		t.Fatalf("Service %s is not blocked on the VIP: %+v", blocked.Name, result)
+	}
+
+	portsChanged := holder.DeepCopy()
+	portsChanged.Spec.Ports = []v1.ServicePort{tcpPort(8080)}
+	statusCleared := holder.DeepCopy()
+	statusCleared.Status.LoadBalancer.Ingress = nil
+	hcChanged := holder.DeepCopy()
+	hcChanged.Annotations[annotations.ExternalHealthCheckKey] = "10.0.0.100:12345"
+	conditionsChanged := holder.DeepCopy()
+	conditionsChanged.Status.Conditions = []metav1.Condition{{Type: "foo"}}
+
+	testCases := []struct {
+		desc       string
+		oldSvc     *v1.Service
+		newSvc     *v1.Service
+		wantQueued int
+	}{
+		{desc: "added", newSvc: holder, wantQueued: 2},
+		{desc: "deleted", oldSvc: holder, wantQueued: 2},
+		{desc: "ports changed", oldSvc: holder, newSvc: portsChanged, wantQueued: 2},
+		{desc: "status cleared", oldSvc: holder, newSvc: statusCleared, wantQueued: 2},
+		{desc: "external health check changed", oldSvc: holder, newSvc: hcChanged, wantQueued: 2},
+		{desc: "unrelated change", oldSvc: holder, newSvc: conditionsChanged, wantQueued: 0},
+		{desc: "resync", oldSvc: holder, newSvc: holder, wantQueued: 0},
+		{desc: "no shared VIP", newSvc: unrelated, wantQueued: 0},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			lc.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("test", "services", 1, func(string) error { return nil }, klog.TODO())
+			lc.enqueueServicesAffectedByVIPChange(tc.oldSvc, tc.newSvc)
+			// The non Standalone NEG holder is never enqueued, other-holder and blocked are.
+			if got := lc.svcQueue.Len(); got != tc.wantQueued {
+				t.Errorf("Got %d enqueued services, want %d", got, tc.wantQueued)
+			}
+		})
+	}
+}
+
 func TestClassifyError(t *testing.T) {
 	testCases := []struct {
 		desc     string
@@ -2704,6 +3095,11 @@ func TestClassifyError(t *testing.T) {
 			desc:     "nil error",
 			err:      nil,
 			expected: ProviderError,
+		},
+		{
+			desc:     "VIP collision wrapped in UserError",
+			err:      l4utils.NewUserError(l4utils.NewVIPCollisionError("10.0.0.1", "service ns/other on TCP:80")),
+			expected: VIPCollision,
 		},
 		{
 			desc:     "not found error",
@@ -3054,6 +3450,27 @@ func withHealthCheckNodePort(port int32) svcOption {
 func withServicePorts(ports ...v1.ServicePort) svcOption {
 	return func(svc *v1.Service) {
 		svc.Spec.Ports = ports
+	}
+}
+
+func withName(name string) svcOption {
+	return func(svc *v1.Service) {
+		svc.Name = name
+	}
+}
+
+func withLBClass(lbClass *string) svcOption {
+	return func(svc *v1.Service) {
+		svc.Spec.LoadBalancerClass = lbClass
+	}
+}
+
+func withStatusIPs(ips ...string) svcOption {
+	return func(svc *v1.Service) {
+		svc.Status.LoadBalancer.Ingress = nil
+		for _, ip := range ips {
+			svc.Status.LoadBalancer.Ingress = append(svc.Status.LoadBalancer.Ingress, v1.LoadBalancerIngress{IP: ip})
+		}
 	}
 }
 

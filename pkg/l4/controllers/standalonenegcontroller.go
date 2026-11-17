@@ -23,7 +23,6 @@ import (
 	"maps"
 	"math/rand"
 	"net"
-	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -34,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -45,6 +45,7 @@ import (
 	l4metrics "k8s.io/ingress-gce/pkg/l4/metrics"
 	"k8s.io/ingress-gce/pkg/l4/resources"
 	l4utils "k8s.io/ingress-gce/pkg/l4/utils"
+	"k8s.io/ingress-gce/pkg/l4/vipsharing"
 	"k8s.io/ingress-gce/pkg/utils"
 	"k8s.io/ingress-gce/pkg/utils/namer"
 	"k8s.io/ingress-gce/pkg/utils/patch"
@@ -71,6 +72,8 @@ const (
 	BackendNotAttached = lbConditionReason("BackendNotAttached")
 	// ProviderError Reason
 	ProviderError = lbConditionReason("ProviderError")
+	// VIPCollision Reason
+	VIPCollision = lbConditionReason("VIPCollision")
 	// Maximum number of forwarding rules
 	ForwardingRulesLimit = 10
 )
@@ -144,17 +147,21 @@ type StandaloneNEGLBController struct {
 	namer     namer.L4ResourcesNamer
 	stopCh    <-chan struct{}
 	hasSynced func() bool
+	// vipReservations checks the VIP collisions and reserves the VIPs of the
+	// services, see the vipsharing package.
+	vipReservations *vipsharing.VIPReservations
 }
 
 // NewStandaloneNEGLBController creates a new instance of StandaloneNEGLBController.
 func NewStandaloneNEGLBController(ctx *ccontext.ControllerContext, stopCh <-chan struct{}, logger klog.Logger) *StandaloneNEGLBController {
 	logger = logger.WithName("StandaloneNEGLBController")
 	lc := &StandaloneNEGLBController{
-		ctx:       ctx,
-		stopCh:    stopCh,
-		namer:     ctx.L4Namer,
-		hasSynced: ctx.HasSynced,
-		logger:    logger,
+		ctx:             ctx,
+		stopCh:          stopCh,
+		namer:           ctx.L4Namer,
+		hasSynced:       ctx.HasSynced,
+		logger:          logger,
+		vipReservations: vipsharing.NewVIPReservations(ctx.ServiceInformer.GetIndexer()),
 	}
 	lc.svcQueue = utils.NewPeriodicTaskQueueWithMultipleWorkers("standalone-l4-neg-lb", "services", defaultNumWorkers, lc.syncWrapper, logger)
 
@@ -167,6 +174,7 @@ func NewStandaloneNEGLBController(ctx *ccontext.ControllerContext, stopCh <-chan
 			if lc.shouldProcess(svc) {
 				lc.enqueue(svc)
 			}
+			lc.enqueueServicesAffectedByVIPChange(nil, svc)
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			curSvc, ok := cur.(*v1.Service)
@@ -176,6 +184,9 @@ func NewStandaloneNEGLBController(ctx *ccontext.ControllerContext, stopCh <-chan
 			oldSvc, okOld := old.(*v1.Service)
 			if okOld && lc.shouldProcess(oldSvc) || lc.shouldProcess(curSvc) {
 				lc.enqueue(curSvc)
+			}
+			if okOld {
+				lc.enqueueServicesAffectedByVIPChange(oldSvc, curSvc)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -192,9 +203,11 @@ func NewStandaloneNEGLBController(ctx *ccontext.ControllerContext, stopCh <-chan
 					return
 				}
 			}
+			lc.releaseVIPs(types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name})
 			if lc.shouldProcess(svc) {
 				lc.enqueue(svc)
 			}
+			lc.enqueueServicesAffectedByVIPChange(svc, nil)
 		},
 	})
 
@@ -260,13 +273,18 @@ func (lc *StandaloneNEGLBController) sync(key string, svcLogger klog.Logger) err
 	if !exists || obj == nil {
 		svcLogger.V(3).Info("Ignoring sync of non-existent service")
 		lc.ctx.L4Metrics.DeleteL4StandaloneNEGService(key)
+		if namespace, name, err := cache.SplitMetaNamespaceKey(key); err == nil {
+			lc.releaseVIPs(types.NamespacedName{Namespace: namespace, Name: name})
+		}
 		return nil
 	}
 	svc := obj.(*v1.Service)
+	svcName := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
 
 	if svc.DeletionTimestamp != nil {
 		svcLogger.V(3).Info("Ignoring sync of service undergoing deletion")
 		lc.ctx.L4Metrics.DeleteL4StandaloneNEGService(key)
+		lc.releaseVIPs(svcName)
 		return nil
 	}
 	if !lc.shouldProcess(svc) {
@@ -275,6 +293,8 @@ func (lc *StandaloneNEGLBController) sync(key string, svcLogger klog.Logger) err
 		if err := lc.clearStatusIngressIP(svc, svcLogger); err != nil {
 			return err
 		}
+		// Claims are released only once the VIPs are removed from the status.
+		lc.releaseVIPs(svcName)
 		if _, err := lc.updateExternalHealthCheckAnnotation(svc, nil, svcLogger); err != nil {
 			return err
 		}
@@ -575,6 +595,7 @@ func sortParsedFRs(frs []parsedForwardingRule) {
 }
 
 func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLogger klog.Logger) (lbSchemes sets.Set[string], err error) {
+	svcName := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
 	frNamesStr, ok := svc.Annotations[annotations.CustomForwardingRuleKey]
 	if !ok || frNamesStr == "" {
 		lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "NoForwardingRuleRef", "Service has no forwarding rule reference")
@@ -584,6 +605,7 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 		if err != nil {
 			return nil, err
 		}
+		lc.releaseVIPs(svcName)
 		if _, err := lc.updateExternalHealthCheckAnnotation(svc, nil, svcLogger); err != nil {
 			return nil, err
 		}
@@ -605,6 +627,9 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 		}
 		cond := NewConditionExternalIPProgrammedFalse(reason)
 		clearErr := updateServiceStatus(lc.ctx, svc, &v1.LoadBalancerStatus{Ingress: nil}, []metav1.Condition{cond}, nil, svcLogger)
+		if clearErr == nil {
+			lc.releaseVIPs(svcName)
+		}
 		_, clearAnnotationErr := lc.updateExternalHealthCheckAnnotation(svc, nil, svcLogger)
 		if len(errs) > 0 {
 			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "ForwardingRuleUnusable", "Could not use any Forwarding Rule: %v", errors.Join(errs...))
@@ -633,11 +658,14 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 	}
 
 	resourceCache := newLBResourceCache()
-	// healthCheckAddrs are the VIP:port entries of the external health check annotation.
-	var healthCheckAddrs []string
-	seenHealthCheckAddrs := sets.New[string]()
-	// collisions maps health check ports colliding with the service TCP ports to the forwarding rules using them.
-	collisions := make(map[int64][]string)
+	// vips are the VIPs of the usable forwarding rules.
+	vips := newServiceVIPs()
+	// externalHealthCheckEntries are the entries of the external health check annotation.
+	var externalHealthCheckEntries []externalHealthCheckEntry
+	seenExternalHealthCheckAddrs := sets.New[string]()
+	// healthCheckPortCollisions maps health check ports colliding with the service TCP ports
+	// to the forwarding rules using them.
+	healthCheckPortCollisions := make(map[int64][]string)
 	// hcErrs are errors related to the external health check annotation, kept separately
 	// from the forwarding rule errors as they do not make the forwarding rules unusable.
 	var hcErrs []error
@@ -655,21 +683,16 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 		}
 		schemes.Insert(fr.LoadBalancingScheme)
 
-		var vips []string
-		for _, a := range addresses {
-			if a == "" {
+		var frVIPs []*vipUsage
+		for _, address := range addresses {
+			// GCP IPv6 forwarding rules provide the IP in CIDR form (e.g. /96 range), the base IP
+			// is extracted and made canonical to avoid warnings from k8s apiserver.
+			vip := vipsharing.CanonicalIP(address)
+			if vip == "" {
 				continue
 			}
-			// GCP IPv6 forwarding rules provide the IP in CIDR form (e.g. /96 range). We must extract the base IP.
-			trimmedIP := strings.Split(a, "/")[0]
-			// And make it canonical to avoid warnings from k8s apiserver
-			if ipAddr, err := netip.ParseAddr(trimmedIP); err == nil {
-				trimmedIP = ipAddr.String()
-			}
-			if trimmedIP != "" {
-				lbIngresses = append(lbIngresses, v1.LoadBalancerIngress{IP: trimmedIP, IPMode: &vipMode})
-				vips = append(vips, trimmedIP)
-			}
+			lbIngresses = append(lbIngresses, v1.LoadBalancerIngress{IP: vip, IPMode: &vipMode})
+			frVIPs = append(frVIPs, vips.add(vip, parsed.rawName))
 		}
 
 		hcPort, ok, err := lc.cachedHealthCheckPort(resourceCache, bs, svc, svcLogger)
@@ -678,40 +701,34 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "ExternalHealthCheckFailed",
 				"Failed to get the health check port of forwarding rule %s: %v", parsed.rawName, err)
 			hcErrs = append(hcErrs, fmt.Errorf("failed to get the health check port of forwarding rule %s: %w", parsed.rawName, err))
+			// The annotation is not updated, so its current entries are still in use.
+			for _, usage := range frVIPs {
+				for _, port := range vipsharing.RedirectedHealthCheckPorts(svc, usage.vip) {
+					usage.redirectedHealthCheckPorts.Insert(port.Port)
+				}
+			}
 		case !ok:
 			// No HTTP health check with a fixed port, nothing to redirect.
 		case hcPort == int64(svc.Spec.HealthCheckNodePort):
 			// The health check already targets the service health check node port, no redirection is needed.
 		case serviceServesTCPPort(svc, hcPort):
-			collisions[hcPort] = append(collisions[hcPort], parsed.rawName)
+			healthCheckPortCollisions[hcPort] = append(healthCheckPortCollisions[hcPort], parsed.rawName)
 		default:
-			for _, vip := range vips {
-				addr := net.JoinHostPort(vip, strconv.FormatInt(hcPort, 10))
-				if !seenHealthCheckAddrs.Has(addr) {
-					seenHealthCheckAddrs.Insert(addr)
-					healthCheckAddrs = append(healthCheckAddrs, addr)
+			for _, usage := range frVIPs {
+				usage.redirectedHealthCheckPorts.Insert(int32(hcPort))
+				addr := net.JoinHostPort(usage.vip, strconv.FormatInt(hcPort, 10))
+				if !seenExternalHealthCheckAddrs.Has(addr) {
+					seenExternalHealthCheckAddrs.Insert(addr)
+					externalHealthCheckEntries = append(externalHealthCheckEntries, externalHealthCheckEntry{vip: usage.vip, addr: addr})
 				}
 			}
 		}
 	}
 
-	for _, port := range slices.Sorted(maps.Keys(collisions)) {
+	for _, port := range slices.Sorted(maps.Keys(healthCheckPortCollisions)) {
 		lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "PortCollision",
 			"Health check port %d collides with a TCP port of the service, skipping it in the %s annotation for forwarding rules: %s",
-			port, annotations.ExternalHealthCheckKey, strings.Join(collisions[port], ", "))
-	}
-
-	// Do not update the annotation if some of its entries could not be determined because
-	// of non user errors (e.g. transient GCE API errors), not to drop entries that are still valid.
-	if len(hcErrs) == 0 && !hasNonUserError(errs) {
-		if changed, err := lc.updateExternalHealthCheckAnnotation(svc, healthCheckAddrs, svcLogger); err != nil {
-			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "UpdateExternalHealthCheckFailed",
-				"Failed to update external health check annotation for load balancer, err: %v", err)
-			hcErrs = append(hcErrs, fmt.Errorf("failed to update the %s annotation: %w", annotations.ExternalHealthCheckKey, err))
-		} else if changed {
-			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeNormal, "UpdateExternalHealthCheckSuccessful",
-				"Successfully updated external health check annotation for load balancer")
-		}
+			port, annotations.ExternalHealthCheckKey, strings.Join(healthCheckPortCollisions[port], ", "))
 	}
 
 	if len(errs) > 0 {
@@ -721,16 +738,50 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "ForwardingRuleUnusable", "Some Forwarding Rules could not be used: %v", errors.Join(errs...))
 		}
 	}
+
+	// VIPs colliding with other services are blocked: they are neither added to the
+	// status, nor to the external health check annotation.
+	collisionErrs := lc.reserveVIPs(svc, vips, svcLogger)
+	lbIngresses = slices.DeleteFunc(lbIngresses, func(ingress v1.LoadBalancerIngress) bool {
+		return vips.isBlocked(ingress.IP)
+	})
+	var externalHealthCheckAddrs []string
+	for _, entry := range externalHealthCheckEntries {
+		if !vips.isBlocked(entry.vip) {
+			externalHealthCheckAddrs = append(externalHealthCheckAddrs, entry.addr)
+		}
+	}
+
+	// Do not update the annotation if some of its entries could not be determined because
+	// of non user errors (e.g. transient GCE API errors), not to drop entries that are still valid.
+	if len(hcErrs) == 0 && !hasNonUserError(errs) && !hasNonUserError(collisionErrs) {
+		if changed, err := lc.updateExternalHealthCheckAnnotation(svc, externalHealthCheckAddrs, svcLogger); err != nil {
+			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeWarning, "UpdateExternalHealthCheckFailed",
+				"Failed to update external health check annotation for load balancer, err: %v", err)
+			hcErrs = append(hcErrs, fmt.Errorf("failed to update the %s annotation: %w", annotations.ExternalHealthCheckKey, err))
+		} else if changed {
+			lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeNormal, "UpdateExternalHealthCheckSuccessful",
+				"Successfully updated external health check annotation for load balancer")
+		}
+	}
+
 	// if at least one FR was ok then we use it
 	if len(lbIngresses) == 0 {
 		// if none of the FRs is usable remove any that is possibly there
 		var firstErr error
 		if len(errs) > 0 {
 			firstErr = errs[0]
+		} else if len(collisionErrs) > 0 {
+			firstErr = collisionErrs[0]
 		}
 		cond := NewConditionExternalIPProgrammedFalse(classifyError(firstErr))
 		clearErr := updateServiceStatus(lc.ctx, svc, &v1.LoadBalancerStatus{Ingress: nil}, []metav1.Condition{cond}, nil, svcLogger)
+		if clearErr == nil {
+			// All the VIPs are blocked, this releases all the reservations of the service.
+			lc.commitVIPs(svc, vips)
+		}
 		allErrs := append([]error{clearErr}, errs...)
+		allErrs = append(allErrs, collisionErrs...)
 		allErrs = append(allErrs, hcErrs...)
 		return schemes, joinMaybeUserErrors(allErrs...)
 	}
@@ -752,12 +803,22 @@ func (lc *StandaloneNEGLBController) syncStandaloneNEGLB(svc *v1.Service, svcLog
 	if err := updateServiceStatus(lc.ctx, svc, newStatus, []metav1.Condition{cond}, nil, svcLogger); err != nil {
 		return schemes, err
 	}
+	lc.commitVIPs(svc, vips)
 
-	if len(errs) > 0 || len(hcErrs) > 0 {
-		return schemes, joinMaybeUserErrors(append(errs, hcErrs...)...)
+	allErrs := append(errs, collisionErrs...)
+	allErrs = append(allErrs, hcErrs...)
+	if len(allErrs) > 0 {
+		return schemes, joinMaybeUserErrors(allErrs...)
 	}
 	lc.ctx.Recorder(svc.Namespace).Eventf(svc, v1.EventTypeNormal, "SyncLoadBalancerSuccessful", "Successfully programmed Standalone NEG LoadBalancer IP(s)")
 	return schemes, nil
+}
+
+// externalHealthCheckEntry is an entry of the external health check annotation.
+type externalHealthCheckEntry struct {
+	vip string
+	// addr is the VIP:port address of the entry.
+	addr string
 }
 
 // join errors but if all are UserErrors make the wrapping error a UserError as
@@ -863,6 +924,9 @@ func classifyError(err error) lbConditionReason {
 	if l4utils.IsBackendNotAttachedError(err) {
 		return BackendNotAttached
 	}
+	if l4utils.IsVIPCollisionError(err) {
+		return VIPCollision
+	}
 	if utils.IsNotFoundError(err) {
 		return InvalidForwardingRule
 	}
@@ -910,6 +974,8 @@ func messageForReason(reason lbConditionReason) string {
 		return "The service NEGs are not attached to the load balancer backend service"
 	case ProviderError:
 		return "GCE provider error encountered while retrieving forwarding rules"
+	case VIPCollision:
+		return "The load balancer VIP collides with ports of another service"
 	default:
 		return "An unexpected error occurred while programming external IPs"
 	}

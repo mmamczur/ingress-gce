@@ -43,6 +43,7 @@ import (
 	informerfrontendconfig "k8s.io/ingress-gce/pkg/frontendconfig/client/informers/externalversions/frontendconfig/v1beta1"
 	"k8s.io/ingress-gce/pkg/instancegroups"
 	l4metrics "k8s.io/ingress-gce/pkg/l4/metrics"
+	"k8s.io/ingress-gce/pkg/l4/vipsharing"
 	l4lbconfigclient "k8s.io/ingress-gce/pkg/l4lbconfig/client/clientset/versioned"
 	informerl4lbconfig "k8s.io/ingress-gce/pkg/l4lbconfig/client/informers/externalversions/l4lbconfig/v1"
 	"k8s.io/ingress-gce/pkg/metrics"
@@ -220,6 +221,13 @@ func NewControllerContext(
 		SvcNegInformer:          informersvcneg.NewServiceNetworkEndpointGroupInformer(svcnegClient, config.Namespace, config.ResyncPeriod, utils.NewNamespaceIndexer()),
 		recordersManager:        recorders.NewManager(eventRecorderClient, logger),
 		logger:                  logger,
+	}
+
+	// Index services by their LoadBalancer VIPs to find the services sharing a VIP.
+	if err := context.ServiceInformer.AddIndexers(cache.Indexers{
+		vipsharing.ServicesByLBIngressIPIndex: vipsharing.ServicesByLBIngressIPFunc,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to add the %s index to the service informer: %w", vipsharing.ServicesByLBIngressIPIndex, err)
 	}
 
 	if backendConfigClient != nil {
